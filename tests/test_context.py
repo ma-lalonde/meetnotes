@@ -58,9 +58,14 @@ def server(monkeypatch):
     `entries` is what /api/v0/models reports, so a test can put a model in the
     loaded state with a given loaded_context_length.
     """
-    def make(ceiling, entries=None):
+    def make(ceiling, entries=None, cost=0, free=0):
         attempts, unloaded = [], []
         state = list(entries) if entries is not None else None
+        # cost/free default to zero, meaning "unknown", which is what a machine
+        # without nvidia-smi reports and which must not gate anything.
+        monkeypatch.setattr(llm, "estimate_load", lambda m, c, g="max": (cost, "estimate"))
+        monkeypatch.setattr(llm, "free_vram_mb", lambda: free)
+        monkeypatch.setattr(llm, "loaded", lambda: [])
 
         def catalog(cfg):
             if state is None:
@@ -99,6 +104,69 @@ def server(monkeypatch):
 @pytest.fixture
 def loads(server):
     return lambda ceiling, entries=None: server(ceiling, entries)[0]
+
+
+def test_a_model_too_big_for_the_card_is_named_as_such(server):
+    # "failed to load model" is all LM Studio says. --estimate-only turns that
+    # into a number that can be compared against the card.
+    attempts, _ = server(0, cost=9200, free=7600)
+    cfg = Config()
+    cfg.llm.model = "qwen3-14b"
+    with pytest.raises(llm.LoadFailed) as caught:
+        llm.fit_context(cfg, 60000)
+    message = str(caught.value)
+    assert "9200 MB" in message
+    assert "7600 MB" in message
+    assert "gpu_offload" in message
+    # Nothing was even attempted: the estimate ruled every size out first.
+    assert attempts == []
+
+
+def test_a_size_that_fits_is_still_tried_when_a_bigger_one_does_not(server, monkeypatch):
+    attempts, _ = server(131072, free=7600)
+    monkeypatch.setattr(
+        llm, "estimate_load",
+        lambda model, context, gpu="max": (5000 if context <= 8192 else 9000, ""),
+    )
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    # Short enough that 8192 is genuinely enough, so the skip is what is under
+    # test rather than the shortfall check.
+    ok, _ = llm.fit_context(cfg, 2000)
+    assert ok
+    # The oversized step was skipped without being attempted, not failed.
+    assert attempts == [8192]
+
+
+def test_an_unknown_estimate_does_not_block_the_load(server):
+    # No nvidia-smi, or an lms build that reports nothing: fall back to trying.
+    attempts, _ = server(131072, cost=0, free=0)
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, _ = llm.fit_context(cfg, 60000)
+    assert ok
+    assert attempts == [llm.required_context(60000)]
+
+
+def test_a_model_still_resident_after_unload_is_reported(server, monkeypatch):
+    # "the model is not unloaded" was invisible: a zero exit from unload --all
+    # does not prove the memory came back.
+    server(131072)
+    monkeypatch.setattr(llm, "loaded", lambda: ["qwen3-8b  8.0 GB  loaded"])
+    lines = []
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    llm.fit_context(cfg, 60000, log=lines.append)
+    assert any("STILL LOADED" in line for line in lines)
+
+
+def test_the_unload_records_what_the_card_actually_gave_back(server, monkeypatch):
+    server(131072, free=1000)
+    lines = []
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    llm.fit_context(cfg, 60000, log=lines.append)
+    assert any("free VRAM" in line for line in lines)
 
 
 def test_fit_context_uses_the_size_the_transcript_needs(loads):

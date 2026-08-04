@@ -420,6 +420,15 @@ def cmd_llm_check(cfg, args) -> int:
     if lms:
         for line in llm.loaded()[:12]:
             print(f"  lms ps   {line}")
+        free = llm.free_vram_mb()
+        print("\ncost of this model at each context size, without loading it:")
+        for size in llm.CONTEXT_STEPS:
+            cost, note = llm.estimate_load(cfg.llm.model, size, cfg.llm.gpu_offload)
+            if not cost:
+                print(f"  {size:>6}  no estimate: {note.splitlines()[0][:80] if note else 'none'}")
+                break
+            verdict = "fits" if not free or cost <= free else f"NEEDS {cost - free} MB MORE"
+            print(f"  {size:>6}  {cost:>6} MB   {verdict}")
     else:
         print(
             "\n  Without it meetnotes cannot set the context size or unload a\n"

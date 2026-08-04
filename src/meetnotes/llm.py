@@ -15,6 +15,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -198,6 +199,43 @@ def required_context(prompt_chars: int, reserve: int = ANSWER_RESERVE) -> int:
     return CONTEXT_STEPS[-1]
 
 
+_ESTIMATE = re.compile(r"Estimated GPU Memory:\s*([\d.]+)\s*(GB|MB)", re.I)
+
+
+def estimate_load(model: str, context: int, gpu: str = "max") -> tuple[int, str]:
+    """GPU memory this model would need at this context, in MB. Zero if unknown.
+
+    `lms load --estimate-only` reports it without loading anything, and honours
+    --context-length and --gpu. It is the difference between "failed to load
+    model" and "needs 9.2 GB, the card has 8.0". LM Studio's resource guardrails
+    also refuse loads they predict will not fit, and this is where that shows up.
+    """
+    lms = lms_binary()
+    if not lms:
+        return 0, "the lms CLI was not found"
+    try:
+        done = subprocess.run(
+            [lms, "load", model, "--estimate-only",
+             f"--context-length={context}", f"--gpu={gpu}"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 0, str(exc)
+    text = ((done.stdout or "") + (done.stderr or "")).strip()
+    found = _ESTIMATE.search(text)
+    if not found:
+        return 0, text[:300]
+    size = float(found.group(1))
+    return int(size * 1024 if found.group(2).upper() == "GB" else size), text[:300]
+
+
+def free_vram_mb() -> int:
+    from . import hardware
+
+    gpus = hardware.nvidia()
+    return gpus[0].get("free_mb", 0) if gpus else 0
+
+
 def load_model(model: str, context: int, gpu: str = "max") -> tuple[bool, str]:
     """Load a model at a given context length via the lms CLI.
 
@@ -282,16 +320,37 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
     if cfg.llm.max_context:
         wanted = min(wanted, cfg.llm.max_context)
 
+    before = free_vram_mb()
     freed, detail = unload()
     if log:
-        log(f"unloaded every model: {detail}" if freed else f"unload failed: {detail}")
+        log(f"unload --all: {detail}" if freed else f"unload --all FAILED: {detail}")
+    # A zero exit does not prove the memory came back. Say what actually
+    # changed, because "the model is not unloaded" is otherwise invisible here.
+    after = free_vram_mb()
+    if log and (before or after):
+        log(f"free VRAM {before} MB before the unload, {after} MB after")
+    still = [line for line in loaded() if line]
+    if log and still:
+        log("STILL LOADED after unload --all: " + " | ".join(still[:6]))
 
     sizes = [size for size in CONTEXT_STEPS if size <= wanted] or [CONTEXT_STEPS[0]]
     last = ""
+    short = []
     for size in reversed(sizes):
+        # Ask what it would cost before spending a minute finding out. LM Studio
+        # answers "failed to load model" either way; this turns that into a
+        # number that can be compared against the card.
+        cost, note = estimate_load(cfg.llm.model, size, cfg.llm.gpu_offload)
+        if log and (cost or note):
+            log(f"{size} tokens: estimated {cost or '?'} MB, {after or '?'} MB free")
+        if cost and after and cost > after:
+            short.append((size, cost))
+            if log:
+                log(f"  skipping {size}: needs {cost} MB, {after} MB free")
+            continue
         if log:
             log(f"loading {cfg.llm.model} with {size} tokens of context")
-        ok, detail = load_model(cfg.llm.model, size)
+        ok, detail = load_model(cfg.llm.model, size, cfg.llm.gpu_offload)
         if ok:
             # A zero exit says the command was accepted, not that the size was
             # honoured. Ask the server what it actually loaded.
@@ -301,8 +360,17 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
         last = (detail or "").splitlines()[0][:160] if detail else ""
         if log:
             log(f"  {size} did not load: {last}")
-    # Every size failed, so the weights themselves do not fit, not the KV cache.
-    # Summarizing would now hit the same wall with a less useful message.
+
+    if short and len(short) == len(sizes):
+        # Not a context problem: the weights alone do not fit on this card.
+        size, cost = short[-1]
+        raise LoadFailed(
+            f"{cfg.llm.model} needs about {cost} MB of VRAM even at {size} tokens "
+            f"of context, but only {after} MB is free.{vram_note()} It is too "
+            f"large for this card at any context size. Use a smaller quantization "
+            f"or a smaller model, or set llm.gpu_offload below max so some layers "
+            f"run on the CPU."
+        )
     raise LoadFailed(
         f"could not load {cfg.llm.model} at any context size "
         f"({sizes[-1]} to {sizes[0]}).{vram_note()} Something else is holding "

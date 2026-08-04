@@ -91,6 +91,10 @@ class Llm:
     # lms CLI; ignored without it.
     auto_context: bool = True
     max_context: int = 0
+    # How much of the model to put on the GPU: "max", "off", or 0-1. Lowering
+    # this is what makes a model too big for the card loadable at all, at the
+    # cost of speed.
+    gpu_offload: str = "max"
     summary_prompt: str = prompts.SUMMARY
     actions_prompt: str = prompts.ACTIONS
     cleanup_prompt: str = prompts.CLEANUP
