@@ -46,6 +46,42 @@ STAGES = [
 ]
 
 
+RAW = "raw_output"
+# Artifacts that used to sit at the top level of a meeting folder.
+MOVED = {
+    "transcription.md": f"{RAW}/transcription.md",
+    "transcription_cleaned.md": f"{RAW}/transcription_cleaned.md",
+    "notes.md": f"{RAW}/notes.md",
+}
+
+
+def migrate_layout(path: Path, meta: dict) -> list[str]:
+    """Move previously written files into raw_output.
+
+    Anything hand-edited moves with its edits intact rather than being
+    regenerated, and is left flagged as hand-edited in its new location.
+    """
+    moved = []
+    records = meta.setdefault("artifacts", {})
+    for old, new in MOVED.items():
+        source = path / old
+        if not source.exists():
+            records.pop(old, None)
+            continue
+        target = path / new
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(target)
+            if old in records:
+                records[new] = records[old]
+            moved.append(new)
+        elif records.get(old, {}).get("output_hash") == artifacts.file_hash(source):
+            # Already regenerated in the new place and this copy is untouched.
+            source.unlink()
+        records.pop(old, None)
+    return moved
+
+
 def _reporter(progress):
     """Accept both progress(step) and progress(step, fraction).
 
@@ -126,18 +162,20 @@ def process(path: Path, cfg, force: bool = False, with_llm: bool = True, progres
         if progress:
             progress("writing transcripts", stage_fraction("transcribing"))
 
+        migrate_layout(path, meta)
+
         base = artifacts.sha(segments, meta.get("notes", []), meta.get("run", {}))
-        report["transcription.md"] = artifacts.ensure(
-            path, meta, "transcription.md", base,
+        report[f"{RAW}/transcription.md"] = artifacts.ensure(
+            path, meta, f"{RAW}/transcription.md", base,
             lambda: outputs.render_transcript(meta, segments, clean=False), force,
         )
-        report["transcription_cleaned.md"] = artifacts.ensure(
-            path, meta, "transcription_cleaned.md",
+        report[f"{RAW}/transcription_cleaned.md"] = artifacts.ensure(
+            path, meta, f"{RAW}/transcription_cleaned.md",
             artifacts.sha(base, outputs.filler_version()),
             lambda: outputs.render_transcript(meta, segments, clean=True), force,
         )
-        report["notes.md"] = artifacts.ensure(
-            path, meta, "notes.md", artifacts.sha(meta.get("notes", [])),
+        report[f"{RAW}/notes.md"] = artifacts.ensure(
+            path, meta, f"{RAW}/notes.md", artifacts.sha(meta.get("notes", [])),
             lambda: outputs.render_notes(meta), force,
         )
         report["transcription_cleaned_with_notes.md"] = artifacts.ensure(

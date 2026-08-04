@@ -39,10 +39,10 @@ def test_unconfigured_llm_keeps_the_transcripts(meeting):
 
     report = pipeline.process(path, cfg)
 
-    assert (path / "transcription.md").exists()
-    assert (path / "transcription_cleaned.md").exists()
-    assert (path / "notes.md").exists()
-    assert report["transcription.md"] == "written"
+    assert (path / "raw_output/transcription.md").exists()
+    assert (path / "raw_output/transcription_cleaned.md").exists()
+    assert (path / "raw_output/notes.md").exists()
+    assert report["raw_output/transcription.md"] == "written"
     assert report["summary.md"].startswith("skipped:")
 
 
@@ -65,7 +65,7 @@ def test_unreachable_llm_is_not_fatal(meeting, monkeypatch):
     )
 
     report = pipeline.process(path, cfg)
-    assert (path / "transcription.md").exists()
+    assert (path / "raw_output/transcription.md").exists()
     assert "connection refused" in report["summary.md"]
 
 
@@ -87,4 +87,4 @@ def test_retry_after_configuring_the_llm_completes(meeting, monkeypatch):
     assert (path / "summary.md").exists()
     assert store.read_meta(path)["state"] == "done"
     # The transcripts were already correct, so they are left alone.
-    assert report["transcription.md"] == "skipped"
+    assert report["raw_output/transcription.md"] == "skipped"

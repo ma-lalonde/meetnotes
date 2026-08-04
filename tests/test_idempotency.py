@@ -52,10 +52,13 @@ def snapshot(path):
     }
 
 
+RAW_TRANSCRIPT = "raw_output/transcription.md"
+
+
 def test_first_run_writes_then_second_run_skips(meeting):
     cfg, path = meeting
     first = pipeline.process(path, cfg, with_llm=False)
-    assert first["transcription.md"] == "written"
+    assert first[RAW_TRANSCRIPT] == "written"
 
     before = snapshot(path)
     before_meta = (path / store.META).read_bytes()
@@ -78,22 +81,22 @@ def test_no_temp_files_and_no_duplicates(meeting):
 def test_hand_edited_file_is_never_clobbered(meeting):
     cfg, path = meeting
     pipeline.process(path, cfg, with_llm=False)
-    edited = path / "transcription.md"
+    edited = path / "raw_output/transcription.md"
     edited.write_text("my own words\n")
 
     report = pipeline.process(path, cfg, with_llm=False)
-    assert report["transcription.md"] == "hand-edited"
+    assert report["raw_output/transcription.md"] == "hand-edited"
     assert edited.read_text() == "my own words\n"
 
 
 def test_force_overwrites_hand_edited(meeting):
     cfg, path = meeting
     pipeline.process(path, cfg, with_llm=False)
-    (path / "transcription.md").write_text("my own words\n")
+    (path / "raw_output/transcription.md").write_text("my own words\n")
 
     report = pipeline.process(path, cfg, with_llm=False, force=True)
-    assert report["transcription.md"] == "written"
-    assert "my own words" not in (path / "transcription.md").read_text()
+    assert report["raw_output/transcription.md"] == "written"
+    assert "my own words" not in (path / "raw_output/transcription.md").read_text()
 
 
 def test_changed_input_regenerates_only_dependents(meeting):
@@ -104,9 +107,9 @@ def test_changed_input_regenerates_only_dependents(meeting):
     store.update_meta(path, notes=[{"at": 5.0, "text": "new note"}])
     report = pipeline.process(path, cfg, with_llm=False)
 
-    assert report["notes.md"] == "written"
-    assert report["transcription.md"] == "written"
-    assert (path / "notes.md").read_bytes() != before["notes.md"][1]
+    assert report["raw_output/notes.md"] == "written"
+    assert report["raw_output/transcription.md"] == "written"
+    assert (path / "raw_output/notes.md").read_bytes() != before["raw_output/notes.md"][1]
 
 
 def test_filler_ruleset_bump_regenerates_cleaned_only(meeting, monkeypatch):
@@ -115,9 +118,46 @@ def test_filler_ruleset_bump_regenerates_cleaned_only(meeting, monkeypatch):
 
     monkeypatch.setattr("meetnotes.outputs.filler_version", lambda: 99)
     report = pipeline.process(path, cfg, with_llm=False)
-    assert report["transcription_cleaned.md"] == "written"
-    assert report["transcription.md"] == "skipped"
-    assert report["notes.md"] == "skipped"
+    assert report["raw_output/transcription_cleaned.md"] == "written"
+    assert report["raw_output/transcription.md"] == "skipped"
+    assert report["raw_output/notes.md"] == "skipped"
+
+
+def test_old_layout_files_move_into_raw_output(meeting):
+    cfg, path = meeting
+    pipeline.process(path, cfg, with_llm=False)
+
+    # Recreate the previous layout: files at the top level, recorded there.
+    meta = store.read_meta(path)
+    for old, new in pipeline.MOVED.items():
+        (path / new).replace(path / old)
+        meta["artifacts"][old] = meta["artifacts"].pop(new)
+    store.write_meta(path, meta)
+
+    report = pipeline.process(path, cfg, with_llm=False)
+
+    assert set(report.values()) == {"skipped"}
+    for old, new in pipeline.MOVED.items():
+        assert not (path / old).exists()
+        assert (path / new).exists()
+    assert not set(pipeline.MOVED) & set(store.read_meta(path)["artifacts"])
+
+
+def test_migration_preserves_hand_edits(meeting):
+    cfg, path = meeting
+    pipeline.process(path, cfg, with_llm=False)
+
+    meta = store.read_meta(path)
+    (path / RAW_TRANSCRIPT).replace(path / "transcription.md")
+    meta["artifacts"]["transcription.md"] = meta["artifacts"].pop(RAW_TRANSCRIPT)
+    store.write_meta(path, meta)
+    (path / "transcription.md").write_text("my own words\n")
+
+    report = pipeline.process(path, cfg, with_llm=False)
+
+    assert (path / RAW_TRANSCRIPT).read_text() == "my own words\n"
+    assert report[RAW_TRANSCRIPT] == "hand-edited"
+    assert not (path / "transcription.md").exists()
 
 
 def test_second_caller_gets_busy_not_a_duplicate_run(meeting):

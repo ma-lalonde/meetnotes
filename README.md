@@ -62,15 +62,19 @@ Everything else is automatic. Closing the window keeps it running in the tray.
 One folder per meeting:
 
 ```
-transcription.md          verbatim, timecoded, one heading per speaker
-transcription_cleaned.md  fillers removed, nothing else changed
 transcription_cleaned_with_notes.md
-                          the above with your notes interleaved in time
-notes.md                  your notes with timecodes
+                          cleaned transcript, notes interleaved in time
 summary.md                Context / Key points / Decisions / Open questions
 actions.md                readable follow-ups
 actions.json              structured, drives the calendar files
 calendar/*.ics            one VTODO or VEVENT per dated action
+
+raw_output/
+  transcription.md        verbatim, timecoded, one heading per speaker
+  transcription_cleaned.md
+                          fillers removed, nothing else changed
+  notes.md                your notes with timecodes
+
 audio/*.wav               the source recordings
 meeting.json              state, notes, segments, artifact fingerprints
 ```
@@ -175,7 +179,11 @@ regenerate, and **a file you edited by hand is never overwritten** without
 `--force`. Writes are atomic and a per-meeting lock stops the automatic run and
 a manual one colliding.
 
-**Cleaning is deterministic.** `transcription_cleaned.md` comes from a filler-word
+**Raw inputs are kept apart.** The three files under `raw_output/` are the
+unmerged pieces; the four at the top level are what you normally read. Meetings
+recorded before this layout are moved on the next run, hand edits included.
+
+**Cleaning is deterministic.** `raw_output/transcription_cleaned.md` comes from a filler-word
 rule set, never from a language model. The verbatim transcript has to stay
 trustworthy. An LLM rewrite is available per meeting, never automatic.
 
