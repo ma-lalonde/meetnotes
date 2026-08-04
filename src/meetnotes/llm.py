@@ -28,6 +28,15 @@ class LoadFailed(LlmError):
     """The model could not be loaded at any context size."""
 
 
+class ContextTooSmall(LlmError):
+    """The largest context that loads cannot hold this transcript.
+
+    Sending it anyway is worse than failing: the server drops the front of the
+    prompt without saying so, and the result reads like a summary of the whole
+    meeting while covering only the end of it.
+    """
+
+
 def _server_error(resp) -> str:
     """The server's own message, which raise_for_status throws away.
 
@@ -109,24 +118,30 @@ def _headers(cfg) -> dict:
     return {"Authorization": f"Bearer {cfg.llm.api_key or 'none'}"}
 
 
-def unload_all() -> tuple[bool, str]:
-    """Free the GPU by evicting every loaded model.
+def unload(model: str = "") -> tuple[bool, str]:
+    """Evict one model, or every loaded model when no name is given.
 
-    LM Studio's REST API has no unload endpoint, but the lms CLI does. Called
-    before recording so the language model is not squatting on VRAM the speech
-    model is about to need.
+    LM Studio's REST API has no unload endpoint, but the lms CLI does.
     """
     if not shutil.which("lms"):
         return False, "the lms CLI is not on PATH"
+    args = ["lms", "unload", model] if model else ["lms", "unload", "--all"]
     try:
-        done = subprocess.run(
-            ["lms", "unload", "--all"], capture_output=True, text=True, timeout=30
-        )
+        done = subprocess.run(args, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     if done.returncode != 0:
         return False, (done.stderr or done.stdout).strip()[:200]
     return True, (done.stdout or "unloaded").strip()[:200]
+
+
+def unload_all() -> tuple[bool, str]:
+    """Free the GPU by evicting every loaded model.
+
+    Called before recording so the language model is not squatting on VRAM the
+    speech model is about to need.
+    """
+    return unload()
 
 
 CONTEXT_STEPS = (4096, 8192, 16384, 32768, 65536, 131072)
@@ -165,37 +180,70 @@ def load_model(model: str, context: int, gpu: str = "max") -> tuple[bool, str]:
     return True, f"loaded {model} with {context} tokens of context"
 
 
-def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
-    """Reload the model with enough context for this transcript.
+def _check_room(cfg, achieved: int, needed: int) -> None:
+    if achieved >= needed:
+        return
+    raise ContextTooSmall(
+        f"{cfg.llm.model} is loaded with {achieved} tokens of context but this "
+        f"transcript needs about {needed}. The server would silently drop the "
+        f"start of it and summarize only what was left. Use a smaller model so "
+        f"the context fits in VRAM, raise max_context if it is capping this, or "
+        f"summarize a shorter recording.{vram_note()}"
+    )
 
-    Whether the result fits in VRAM is measured rather than predicted: the
-    architecture details needed to compute a KV cache size are not exposed by
-    the API, so a failed load is the signal, and the next smaller size is
-    tried.
+
+def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
+    """Make sure the model is up with enough context for this transcript.
+
+    `lms load` adds an instance rather than replacing one, and LM Studio holds
+    several models at once, so loading a model that is already loaded puts a
+    second copy of the same weights on the card. Hence: reuse the resident
+    instance when it already has the room, and evict it when it does not.
+
+    Whether a given size fits in VRAM is measured rather than predicted, since
+    the architecture details needed to compute a KV cache size are not exposed
+    by the API. A failed load is the signal, and the next smaller size is tried.
     """
     if not shutil.which("lms"):
         # Reloading is the only way to change the context size, and that needs
         # the CLI. Without it, do not even query the server.
         return False, "the lms CLI is not on PATH, leaving the context as loaded"
 
-    # LM Studio holds several models at once, and `lms load` adds an instance
-    # rather than replacing one. The resident copy is about to be superseded by
-    # this reload, so evicting it first is the difference between reloading a
-    # model and trying to fit two copies of it in VRAM.
-    freed, note = unload_all()
-    if log and freed:
-        log(f"unloaded resident models: {note}")
-
-    wanted = required_context(prompt_chars)
+    needed = required_context(prompt_chars)
     ceiling = 0
+    resident = 0
+    is_loaded = False
+    others = []
     for entry in catalog(cfg):
         if entry.get("id") == cfg.llm.model:
             ceiling = int(entry.get("context") or 0)
-            break
+            is_loaded = entry.get("state") == "loaded"
+            resident = int(entry.get("loaded_context") or 0)
+        elif entry.get("state") == "loaded":
+            others.append(entry.get("id") or "")
+
+    wanted = needed
     if ceiling:
         wanted = min(wanted, ceiling)
     if cfg.llm.max_context:
         wanted = min(wanted, cfg.llm.max_context)
+
+    if is_loaded and resident >= wanted:
+        # Already up with the room it needs. Loading it again would only add a
+        # second copy of the same weights.
+        _check_room(cfg, resident, needed)
+        return True, f"{cfg.llm.model} already loaded with {resident} tokens of context"
+
+    # Everything resident is VRAM this load is about to need: the copy being
+    # replaced most of all, since loading over it stacks rather than swaps.
+    for name in [n for n in others if n]:
+        freed, detail = unload(name)
+        if log and freed:
+            log(f"unloaded {name} to make room")
+    if is_loaded:
+        unload(cfg.llm.model)
+        if log:
+            log(f"unloaded {cfg.llm.model} at {resident or 'an unreported'} tokens")
 
     sizes = [size for size in CONTEXT_STEPS if size <= wanted] or [CONTEXT_STEPS[0]]
     last = ""
@@ -204,6 +252,7 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
             log(f"loading {cfg.llm.model} with {size} tokens of context")
         ok, detail = load_model(cfg.llm.model, size)
         if ok:
+            _check_room(cfg, size, needed)
             return True, detail
         last = (detail or "").splitlines()[0][:160] if detail else ""
         if log:
@@ -250,12 +299,18 @@ def catalog(cfg) -> list[dict]:
                             "quantization": item.get("quantization", ""),
                             "state": item.get("state", ""),
                             "context": item.get("max_context_length", 0) or 0,
+                            # Present only while a model is loaded, and absent
+                            # from the published example, so read it defensively:
+                            # zero means "loaded, size unknown", which is a
+                            # reason to reload rather than to trust it.
+                            "loaded_context": item.get("loaded_context_length", 0) or 0,
                         }
                         for item in data
                     ]
     except (httpx.HTTPError, ValueError):
         pass
-    return [{"id": name, "type": "", "arch": "", "quantization": "", "state": "", "context": 0}
+    return [{"id": name, "type": "", "arch": "", "quantization": "", "state": "",
+             "context": 0, "loaded_context": 0}
             for name in list_models(cfg)]
 
 

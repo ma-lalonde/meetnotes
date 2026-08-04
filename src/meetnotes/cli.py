@@ -276,23 +276,28 @@ def cmd_prompt(cfg, args) -> int:
 
     from . import llm
 
-    context = _model_context(cfg)
+    resident, maximum = _model_context(cfg)
     wanted = llm.required_context(len(system) + len(user))
     print(f"context needed       {wanted}")
-    if context:
-        print(f"model context limit  {context}")
-        if estimate > context * 0.75:
-            print(
-                f"\nTOO LONG FOR THE CONTEXT WINDOW: ~{estimate} tokens of input against a\n"
-                f"{context}-token limit. LM Studio truncates the prompt, leaving the model\n"
-                "no room to answer, which comes back as an empty summary."
-            )
-            if cfg.llm.auto_context:
-                print("Post-processing will reload the model at a larger size automatically.")
-            else:
-                print("Turn on auto_context, or reload the model with a larger context.")
+    if maximum:
+        print(f"model context limit  {maximum}")
     else:
         print("model context limit  unknown (server does not report it)")
+    if resident:
+        print(f"loaded right now     {resident}")
+    # Only the loaded size constrains the request; the maximum is what it could
+    # be reloaded at.
+    effective = resident or maximum
+    if effective and estimate > effective * 0.75:
+        print(
+            f"\nTOO LONG FOR THE CONTEXT WINDOW: ~{estimate} tokens of input against a\n"
+            f"{effective}-token limit. LM Studio truncates the prompt, leaving the model\n"
+            "no room to answer, which comes back as an empty summary."
+        )
+        if cfg.llm.auto_context:
+            print("Post-processing will reload the model at a larger size automatically.")
+        else:
+            print("Turn on auto_context, or reload the model with a larger context.")
 
     gpus = hardware.nvidia()
     if gpus:
@@ -314,19 +319,26 @@ def cmd_prompt(cfg, args) -> int:
     return 0
 
 
-def _model_context(cfg) -> int:
-    """The selected model's context length, when the server reports one."""
+def _model_context(cfg) -> tuple[int, int]:
+    """(context the instance is loaded with, the model's maximum).
+
+    The two differ, and only the first one constrains a request. Reporting the
+    maximum alone is how a model loaded at 4096 looks like it has 131072.
+    """
     from . import llm
 
     if not cfg.llm.model:
-        return 0
+        return 0, 0
     try:
         for entry in llm.catalog(cfg):
             if entry.get("id") == cfg.llm.model:
-                return int(entry.get("context") or 0)
+                resident = int(entry.get("loaded_context") or 0)
+                if entry.get("state") != "loaded":
+                    resident = 0
+                return resident, int(entry.get("context") or 0)
     except Exception:
         pass
-    return 0
+    return 0, 0
 
 
 def cmd_llm_check(cfg, args) -> int:
@@ -363,15 +375,17 @@ def cmd_llm_check(cfg, args) -> int:
         print("\nNo model selected. Models tab, or edit config.json.")
         return 1
 
-    context = _model_context(cfg)
-    if context:
-        print(f"context    {context} tokens")
-        if context < 8192:
-            print(
-                "  A meeting transcript rarely fits in this. Load the model with a\n"
-                "  larger context length in LM Studio, 16384 or more, or let\n"
-                "  auto_context reload it for you."
-            )
+    resident, maximum = _model_context(cfg)
+    if maximum:
+        print(f"context    {maximum} tokens maximum")
+    if resident:
+        print(f"           {resident} tokens as currently loaded")
+    if resident and resident < 8192:
+        print(
+            "  A meeting transcript rarely fits in this. Load the model with a\n"
+            "  larger context length in LM Studio, 16384 or more, or let\n"
+            "  auto_context reload it for you."
+        )
     gpus = hardware.nvidia()
     if gpus:
         free = gpus[0].get("free_mb", 0)

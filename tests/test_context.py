@@ -40,26 +40,49 @@ def test_reserve_leaves_room_for_the_answer():
     assert llm.required_context(0, reserve=5000) >= 8192
 
 
-@pytest.fixture
-def loads(monkeypatch):
-    """Record load attempts; fail any above a given ceiling."""
-    attempts = []
+def loaded(model, loaded_context, maximum=131072):
+    """A catalog entry for a model LM Studio reports as currently loaded."""
+    return {"id": model, "context": maximum, "state": "loaded",
+            "loaded_context": loaded_context}
 
-    def make(ceiling):
+
+@pytest.fixture
+def server(monkeypatch):
+    """A fake LM Studio. Returns (load_sizes, unloaded_names), both live lists.
+
+    `entries` is what /api/v0/models reports, so a test can put a model in the
+    loaded state with a given loaded_context_length.
+    """
+    def make(ceiling, entries=None):
+        attempts, unloaded = [], []
+
         def fake_load(model, context, gpu="max"):
             attempts.append(context)
             if context > ceiling:
                 return False, "failed to allocate KV cache"
             return True, f"loaded {model} with {context}"
 
+        def fake_unload(model=""):
+            unloaded.append(model)
+            return True, "ok"
+
         monkeypatch.setattr(llm.shutil, "which", lambda name: "/usr/bin/lms")
         monkeypatch.setattr(llm, "load_model", fake_load)
-        monkeypatch.setattr(llm, "catalog", lambda cfg: [
-            {"id": cfg.llm.model, "context": 131072}
-        ])
-        return attempts
+        monkeypatch.setattr(llm, "unload", fake_unload)
+        monkeypatch.setattr(
+            llm, "catalog",
+            lambda cfg: entries if entries is not None else [
+                {"id": cfg.llm.model, "context": 131072, "state": "", "loaded_context": 0}
+            ],
+        )
+        return attempts, unloaded
 
     return make
+
+
+@pytest.fixture
+def loads(server):
+    return lambda ceiling, entries=None: server(ceiling, entries)[0]
 
 
 def test_fit_context_uses_the_size_the_transcript_needs(loads):
@@ -73,15 +96,39 @@ def test_fit_context_uses_the_size_the_transcript_needs(loads):
 
 def test_fit_context_steps_down_when_vram_will_not_take_it(loads):
     # Whether it fits is measured, not predicted: a failed load is the signal.
+    # The step-down still runs, but the size it lands on is too small for this
+    # transcript, so it is reported rather than quietly used.
     attempts = loads(8192)
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    ok, detail = llm.fit_context(cfg, 60000)
-    assert ok
+    with pytest.raises(llm.ContextTooSmall):
+        llm.fit_context(cfg, 60000)
     assert attempts[0] > 8192
     assert attempts[-1] == 8192
     assert attempts == sorted(attempts, reverse=True)
-    assert "8192" in detail
+
+
+def test_a_context_that_cannot_hold_the_transcript_is_refused(loads):
+    # Sending it anyway means the server drops the start of the transcript
+    # without saying so, and the summary silently covers only the end.
+    attempts = loads(4096)
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    with pytest.raises(llm.ContextTooSmall) as caught:
+        llm.fit_context(cfg, 60000)
+    message = str(caught.value)
+    assert "4096" in message
+    assert str(llm.required_context(60000)) in message
+    assert attempts[-1] == 4096
+
+
+def test_a_short_transcript_is_fine_at_a_small_size(loads):
+    attempts = loads(4096)
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, detail = llm.fit_context(cfg, 2000)
+    assert ok
+    assert attempts == [4096]
 
 
 def test_fit_context_raises_when_nothing_loads(loads):
@@ -115,22 +162,65 @@ def test_a_failed_load_is_a_partial_result_not_a_lost_transcript(loads):
     assert issubclass(llm.LoadFailed, llm.LlmError)
 
 
-def test_fit_context_evicts_the_resident_model_before_loading(loads, monkeypatch):
-    # LM Studio holds several models at once and `lms load` adds an instance,
-    # so without this the reload competes with the copy it replaces.
-    order = []
-    loads(131072)
-    monkeypatch.setattr(llm, "unload_all", lambda: (order.append("unload"), (True, "ok"))[1])
-    real_load = llm.load_model
-    monkeypatch.setattr(
-        llm, "load_model",
-        lambda *a, **k: (order.append("load"), real_load(*a, **k))[1],
-    )
+def test_an_adequate_resident_model_is_used_as_is(server):
+    # `lms load` adds an instance rather than replacing one, so loading a model
+    # that is already loaded puts a second copy of the weights on the card.
+    attempts, unloaded = server(131072, [loaded("qwen3-8b", 32768)])
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, detail = llm.fit_context(cfg, 60000)
+    assert ok
+    assert attempts == []
+    assert unloaded == []
+    assert "already loaded" in detail
+
+
+def test_a_resident_model_with_too_little_context_is_replaced_not_stacked(server):
+    attempts, unloaded = server(131072, [loaded("qwen3-8b", 4096)])
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, _ = llm.fit_context(cfg, 60000)
+    assert ok
+    assert unloaded == ["qwen3-8b"]
+    assert attempts == [llm.required_context(60000)]
+
+
+def test_a_resident_model_of_unreported_size_is_replaced(server):
+    # loaded_context_length is absent from the published example response, so
+    # a loaded model with no size is treated as unknown, never as adequate.
+    attempts, unloaded = server(131072, [loaded("qwen3-8b", 0)])
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
     llm.fit_context(cfg, 60000)
-    assert order[0] == "unload"
-    assert "load" in order
+    assert unloaded == ["qwen3-8b"]
+    assert attempts == [llm.required_context(60000)]
+
+
+def test_a_different_resident_model_is_evicted_to_make_room(server):
+    attempts, unloaded = server(131072, [
+        loaded("some-other-13b", 32768),
+        {"id": "qwen3-8b", "context": 131072, "state": "not-loaded", "loaded_context": 0},
+    ])
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, _ = llm.fit_context(cfg, 60000)
+    assert ok
+    assert unloaded == ["some-other-13b"]
+    assert attempts == [llm.required_context(60000)]
+
+
+def test_an_adequate_resident_model_is_kept_even_with_others_loaded(server):
+    # Nothing is evicted when no load is needed: the summary can go straight
+    # to the instance that is already up.
+    attempts, unloaded = server(131072, [
+        loaded("some-other-13b", 8192),
+        loaded("qwen3-8b", 65536),
+    ])
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, _ = llm.fit_context(cfg, 60000)
+    assert ok
+    assert (attempts, unloaded) == ([], [])
 
 
 def test_the_model_maximum_is_respected(loads):
@@ -146,8 +236,25 @@ def test_a_configured_ceiling_is_respected(loads):
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
     cfg.llm.max_context = 8192
-    llm.fit_context(cfg, 500000)
+    # The cap holds, and capping below what the transcript needs is reported
+    # rather than used, since the shortfall comes from a setting either way.
+    with pytest.raises(llm.ContextTooSmall) as caught:
+        llm.fit_context(cfg, 500000)
     assert max(attempts) == 8192
+    assert "max_context" in str(caught.value)
+
+
+def test_a_ceiling_above_what_is_needed_does_not_inflate_the_load(loads):
+    # max_context is a cap, not a target: a transcript that fits in 8192 is
+    # loaded at 8192 even when 16384 is allowed.
+    attempts = loads(131072)
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    cfg.llm.max_context = 16384
+    ok, _ = llm.fit_context(cfg, 20000)
+    assert ok
+    assert attempts == [llm.required_context(20000)]
+    assert attempts[0] <= 16384
 
 
 def test_load_model_without_the_cli_is_reported_not_raised(monkeypatch):
