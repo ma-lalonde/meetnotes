@@ -1,0 +1,38 @@
+[project]
+name = "meetnotes"
+version = "0.1.0"
+description = "Local meeting recorder with live transcription, timestamped notes, and local LLM summaries"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "faster-whisper>=1.2.0",
+    "httpx>=0.28",
+    "numpy>=2.1",
+    "pyside6>=6.9",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12>=9",
+]
+diarize = [
+    "pyannote-audio>=4.0.0",
+]
+
+[project.scripts]
+meetnotes = "meetnotes.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/meetnotes"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# The project often lives on an encrypted or removable volume whose filesystem
+# has no hardlink support. Copying avoids the fallback warning on every sync.
+link-mode = "copy"

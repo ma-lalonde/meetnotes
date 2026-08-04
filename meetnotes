@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Launcher that keeps the virtual environment off the project volume.
+#
+# uv stores the environment in ./.venv by default and validates it by resolving
+# .venv/bin/python. On a filesystem without symlink support (exFAT and NTFS, so
+# most VeraCrypt containers) that symlink cannot exist, so uv judges the
+# environment invalid on every launch, deletes it, and reinstalls every wheel by
+# full copy. That is the multi-minute "freeze" before the window appears.
+#
+# UV_PROJECT_ENVIRONMENT is environment-variable only - there is no
+# pyproject.toml equivalent - so it has to be set before uv starts.
+set -euo pipefail
+
+project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+: "${MEETNOTES_VENV:=${XDG_DATA_HOME:-$HOME/.local/share}/meetnotes/venv}"
+export UV_PROJECT_ENVIRONMENT="$MEETNOTES_VENV"
+export UV_LINK_MODE=copy
+
+mkdir -p "$(dirname "$MEETNOTES_VENV")"
+exec uv run --project "$project_dir" meetnotes "$@"

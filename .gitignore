@@ -1,0 +1,26 @@
+# uv / Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local state, never committed
+*.tmp
+meeting.lock
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# uv.lock is intentionally committed: this is an application, so the exact
+# resolved versions are part of what makes a checkout reproducible.

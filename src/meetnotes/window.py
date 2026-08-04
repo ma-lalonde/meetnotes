@@ -1,0 +1,906 @@
+from pathlib import Path
+
+import tempfile
+import threading
+
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QTableWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+)
+
+from . import artifacts, audio, hardware, llm, models, outputs, prompts, store, theme
+
+
+# (label, mode, language codes)
+LANGUAGE_CHOICES = [
+    ("French and English", "restrict", ("fr", "en")),
+    ("Mainly French, some English", "primary", ("fr",)),
+    ("Mainly English, some French", "primary", ("en",)),
+    ("French only", "primary", ("fr",)),
+    ("English only", "primary", ("en",)),
+    ("Detect anything", "auto", ()),
+]
+
+
+class RecordScreen(QWidget):
+    level = Signal(str, float)
+
+    def __init__(self, cfg, session, window):
+        super().__init__()
+        self.cfg = cfg
+        self.session = session
+        self.window = window
+        self.colors: dict[str, str] = {}
+        self.meters: dict[str, audio.Meter] = {}
+        self.level.connect(self._on_level)
+
+        self.title = QLineEdit()
+        self.title.setPlaceholderText("Meeting title")
+        self.mic = QComboBox()
+        self.system = QComboBox()
+        self.mic_level = self._make_meter()
+        self.system_level = self._make_meter()
+        self.button = QPushButton("Start recording")
+        self.button.clicked.connect(self.toggle)
+        self.elapsed = QLabel("00:00:00")
+        clock_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        clock_font.setPointSize(clock_font.pointSize() + 6)
+        self.elapsed.setFont(clock_font)
+
+        mic_row = QHBoxLayout()
+        mic_row.addWidget(self.mic, 3)
+        mic_row.addWidget(self.mic_level, 2)
+        system_row = QHBoxLayout()
+        system_row.addWidget(self.system, 3)
+        system_row.addWidget(self.system_level, 2)
+
+        top = QFormLayout()
+        top.addRow("Title", self.title)
+        top.addRow("Microphone", mic_row)
+        top.addRow("System audio", system_row)
+
+        self.engine = QLabel("")
+        theme.muted(self.engine)
+        self.refresh_engine()
+
+        controls = QHBoxLayout()
+        controls.addWidget(self.button)
+        controls.addWidget(self.elapsed)
+        controls.addStretch()
+        controls.addWidget(self.engine)
+
+        self.transcript = QListWidget()
+        self.transcript.setWordWrap(True)
+        self.notes = QListWidget()
+        self.notes.setWordWrap(True)
+        self.note_input = QLineEdit()
+        self.note_input.setPlaceholderText("Note, then Enter")
+        self.note_input.returnPressed.connect(self.add_note)
+        theme.comfortable(self.title, self.mic, self.system, self.note_input)
+
+        left = QVBoxLayout()
+        left.addWidget(QLabel("Live transcript"))
+        left.addWidget(self.transcript)
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Notes"))
+        right.addWidget(self.notes)
+        right.addWidget(self.note_input)
+
+        panes = QHBoxLayout()
+        panes.addLayout(left, 3)
+        panes.addLayout(right, 2)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addLayout(controls)
+        layout.addLayout(panes)
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self.tick)
+        self.reload()
+        # Persist on change, not only on Start, so picking a source and walking
+        # away still leaves it selected next launch.
+        self.mic.currentIndexChanged.connect(lambda _: self._persist_sources())
+        self.system.currentIndexChanged.connect(lambda _: self._persist_sources())
+
+    def reload(self):
+        for combo, kind, key in (
+            (self.mic, "mic", "mic_source"),
+            (self.system, "system", "system_source"),
+        ):
+            current = getattr(self.cfg.capture, key)
+            combo.blockSignals(True)
+            combo.clear()
+            for source in audio.list_sources():
+                if source.kind == kind:
+                    combo.addItem(source.label, source.target)
+            index = combo.findData(current)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+
+    def refresh_engine(self):
+        """Always show what will actually run, so a bad result is explainable."""
+        plan = hardware.plan(self.cfg)
+        languages = (
+            "/".join(self.cfg.asr.languages)
+            if self.cfg.asr.language_mode == "restrict"
+            else (self.cfg.asr.language or "auto")
+        )
+        self.engine.setText(
+            f"{plan['live_model']} on {plan['device']} ({plan['compute_type']}), {languages}"
+        )
+
+    def _make_meter(self) -> QProgressBar:
+        bar = QProgressBar()
+        bar.setRange(-60, 0)
+        bar.setValue(-60)
+        bar.setFormat("%v dBFS")
+        bar.setTextVisible(True)
+        return bar
+
+    def _on_level(self, kind: str, dbfs: float):
+        bar = self.mic_level if kind == "mic" else self.system_level
+        bar.setValue(int(max(-60.0, min(0.0, dbfs))))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.start_meters()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.stop_meters()
+
+    def start_meters(self):
+        """Run the level meters whenever this screen is visible.
+
+        While recording the levels come from the recording itself rather than
+        a second capture stream, so nothing extra touches the devices.
+        """
+        self.stop_meters()
+        if not self.isVisible():
+            return
+        work = Path(tempfile.mkdtemp(prefix="meetnotes-levels-"))
+
+        if self.session.recording and self.session.recorder is not None:
+            for kind, label in (("mic", self.cfg.capture.mic_label),
+                                ("system", self.cfg.capture.system_label)):
+                path = self.session.recorder.paths.get(label)
+                if path is None:
+                    continue
+                meter = audio.FileMeter(path, lambda db, k=kind: self.level.emit(k, db))
+                self.meters[kind] = meter
+                meter.start()
+            return
+
+        known = {s.target: s for s in audio.list_sources()}
+        for kind, key in (("mic", "mic_source"), ("system", "system_source")):
+            source = known.get(getattr(self.cfg.capture, key))
+            if source is None:
+                continue
+            meter = audio.Meter(
+                self.cfg.capture.record_cmd, self.cfg.capture.sample_rate, source, work,
+                lambda db, k=kind: self.level.emit(k, db),
+            )
+            self.meters[kind] = meter
+            meter.start()
+
+    def stop_meters(self):
+        for meter in self.meters.values():
+            meter.stop()
+        for meter in self.meters.values():
+            meter.join(timeout=3)
+        self.meters.clear()
+        self.mic_level.setValue(-60)
+        self.system_level.setValue(-60)
+
+    def _persist_sources(self):
+        if self.mic.currentData():
+            self.cfg.capture.mic_source = self.mic.currentData()
+        if self.system.currentData():
+            self.cfg.capture.system_source = self.system.currentData()
+        self.cfg.save()
+
+    def toggle(self):
+        if self.session.recording:
+            self.session.stop()
+            self.timer.stop()
+            self.button.setText("Start recording")
+            self.start_meters()
+            return
+        self._persist_sources()
+        self.transcript.clear()
+        self.notes.clear()
+        try:
+            self.session.start(self.title.text().strip() or "meeting")
+        except Exception as exc:
+            QMessageBox.critical(self, "Cannot record", str(exc))
+            return
+        self.timer.start()
+        self.button.setText("Stop")
+        self.note_input.setFocus()
+        self.start_meters()
+
+    def tick(self):
+        self.elapsed.setText(outputs.clock(self.session.elapsed()))
+
+    def add_note(self):
+        text = self.note_input.text().strip()
+        if not text or not self.session.recording:
+            return
+        self.session.add_note(text)
+        self.note_input.clear()
+
+    def on_segment(self, segment: dict):
+        if segment["speaker"] not in self.colors:
+            palette = theme.speaker_colors(self.transcript)
+            self.colors[segment["speaker"]] = palette[len(self.colors) % len(palette)]
+        item = QListWidgetItem(
+            f"[{outputs.clock(segment['start'])}] {segment['speaker']}: {segment['text']}"
+        )
+        item.setForeground(QColor(self.colors[segment["speaker"]]))
+        at_bottom = self.transcript.verticalScrollBar().value() >= (
+            self.transcript.verticalScrollBar().maximum() - 4
+        )
+        self.transcript.addItem(item)
+        if at_bottom:
+            self.transcript.scrollToBottom()
+
+    def on_note(self, note: dict):
+        self.notes.addItem(f"[{outputs.clock(note['at'])}] {note['text']}")
+        self.notes.scrollToBottom()
+
+
+class LibraryScreen(QWidget):
+    HEADERS = ["Meeting", "State", "Length", "Artifacts", ""]
+
+    def __init__(self, cfg, session, window):
+        super().__init__()
+        self.cfg = cfg
+        self.session = session
+        self.window = window
+
+        self.table = QTableWidget(0, len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.reload)
+        process = QPushButton("Post-process")
+        process.clicked.connect(lambda: self.run(False))
+        force = QPushButton("Force regenerate")
+        force.clicked.connect(lambda: self.run(True))
+        reveal = QPushButton("Open folder")
+        reveal.clicked.connect(self.open_folder)
+        import_audio = QPushButton("Import audio...")
+        import_audio.clicked.connect(self.import_audio)
+
+        buttons = QHBoxLayout()
+        for widget in (refresh, process, force, reveal, import_audio):
+            buttons.addWidget(widget)
+        buttons.addStretch()
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.table)
+        layout.addLayout(buttons)
+        self.reload()
+
+    def reload(self):
+        meetings = store.list_meetings(self.cfg.root)
+        self.table.setRowCount(len(meetings))
+        for row, meta in enumerate(meetings):
+            self.table.setItem(row, 0, QTableWidgetItem(meta["id"]))
+            self.table.setItem(row, 1, QTableWidgetItem(meta.get("state", "")))
+            self.table.setItem(row, 2, QTableWidgetItem(outputs.clock(meta.get("duration", 0))))
+            self.table.setItem(row, 3, QTableWidgetItem(self._artifact_summary(meta)))
+            self.table.setItem(row, 4, QTableWidgetItem(meta.get("error", "")[:60]))
+            self.table.item(row, 0).setData(Qt.UserRole, meta["path"])
+
+    def _artifact_summary(self, meta: dict) -> str:
+        path = Path(meta["path"])
+        recorded = meta.get("artifacts", {})
+        if not recorded:
+            return "-"
+        edited = []
+        for name, record in recorded.items():
+            target = path / name
+            if name == "segments" or not target.exists():
+                continue
+            if artifacts.file_hash(target) != record.get("output_hash"):
+                edited.append(name)
+        count = len([n for n in recorded if n != "segments"])
+        return f"{count} files" + (f", {len(edited)} hand-edited" if edited else "")
+
+    def selected(self) -> Path | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        return Path(self.table.item(row, 0).data(Qt.UserRole))
+
+    def run(self, force: bool):
+        path = self.selected()
+        if not path:
+            return
+        if force:
+            confirm = QMessageBox.question(
+                self, "Force regenerate",
+                f"Overwrite every generated file in {path.name}, including any you edited by hand?",
+            )
+            if confirm != QMessageBox.Yes:
+                return
+        self.session.process_async(path, force=force)
+
+    def open_folder(self):
+        path = self.selected()
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def import_audio(self):
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Import audio", str(Path.home()), "Audio (*.wav *.mp3 *.m4a *.flac *.ogg)"
+        )
+        if not chosen:
+            return
+        source = Path(chosen)
+        self.cfg.root.mkdir(parents=True, exist_ok=True)
+        path = store.new_meeting(self.cfg.root, source.stem)
+        target = path / "audio" / f"{self.cfg.capture.system_label}{source.suffix}"
+        target.write_bytes(source.read_bytes())
+        store.update_meta(
+            path, tracks={self.cfg.capture.system_label: target.name}, state="pending"
+        )
+        self.reload()
+        self.session.process_async(path)
+
+
+class SettingsScreen(QWidget):
+    gpu_log = Signal(str)
+
+    def __init__(self, cfg, session, window):
+        super().__init__()
+        self.cfg = cfg
+        self.window = window
+        self.gpu_log.connect(self._append_gpu_log)
+
+        self.data_dir = QLineEdit(str(cfg.root))
+        browse = QPushButton("Browse...")
+        browse.clicked.connect(self.pick_folder)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self.data_dir)
+        folder_row.addWidget(browse)
+
+        self.auto = QCheckBox("Post-process automatically when recording stops")
+        self.auto.setChecked(cfg.auto_process)
+        self.start_in_tray = QCheckBox("Start in the tray without opening the window")
+        self.start_in_tray.setChecked(cfg.start_in_tray)
+        self.minimize_on_quit = QCheckBox("Closing the window minimizes to the tray")
+        self.minimize_on_quit.setChecked(cfg.minimize_on_quit)
+
+        self.profile = QComboBox()
+        self.profile.addItems(["auto", "gpu", "cpu"])
+        self.profile.setCurrentText(cfg.asr.profile)
+        self.language = QComboBox()
+        for label, mode, codes in LANGUAGE_CHOICES:
+            self.language.addItem(label, (mode, codes))
+        index = self.language.findData((cfg.asr.language_mode, tuple(cfg.asr.languages)))
+        if index < 0 and cfg.asr.language_mode == "primary":
+            index = self.language.findData(("primary", (cfg.asr.language,)))
+        self.language.setCurrentIndex(max(index, 0))
+        theme.comfortable(self.profile, self.language, self.data_dir)
+
+        self.temperature = QDoubleSpinBox()
+        self.temperature.setRange(0.0, 2.0)
+        self.temperature.setSingleStep(0.1)
+        self.temperature.setValue(cfg.llm.temperature)
+        theme.comfortable(self.temperature)
+        self.keep_loaded = QCheckBox("Keep the speech model loaded while summarizing")
+        self.keep_loaded.setChecked(cfg.llm.keep_asr_loaded)
+
+        self.summary_prompt = QPlainTextEdit(cfg.llm.summary_prompt)
+        self.actions_prompt = QPlainTextEdit(cfg.llm.actions_prompt)
+
+        self.multilingual = QCheckBox("Detect per segment when set to 'Detect anything'")
+        self.multilingual.setChecked(cfg.asr.multilingual)
+
+        self.diarize = QCheckBox("Enable speaker diarization (not implemented yet)")
+        self.diarize.setEnabled(False)
+
+        self.gpu_status = QLabel("")
+        self.gpu_status.setWordWrap(True)
+        self.gpu_button = QPushButton("Install GPU support")
+        self.gpu_button.clicked.connect(self.install_gpu)
+        self.gpu_output = QPlainTextEdit()
+        self.gpu_output.setReadOnly(True)
+        self.gpu_output.setMaximumHeight(110)
+        self.gpu_output.hide()
+        gpu_row = QHBoxLayout()
+        gpu_row.addWidget(self.gpu_status, 1)
+        gpu_row.addWidget(self.gpu_button)
+        self.refresh_gpu()
+
+        general = QWidget()
+        general_form = QFormLayout(general)
+        general_form.addRow("Output folder", folder_row)
+        general_form.addRow("", self.auto)
+        general_form.addRow("", self.start_in_tray)
+        general_form.addRow("", self.minimize_on_quit)
+
+        speech = QWidget()
+        speech_form = QFormLayout(speech)
+        speech_form.addRow("Profile", self.profile)
+        speech_form.addRow("", QLabel("Model choices live in the Models tab."))
+        speech_form.addRow("Language", self.language)
+        speech_form.addRow("", self.multilingual)
+        speech_form.addRow("Acceleration", gpu_row)
+        speech_form.addRow("", self.gpu_output)
+        speech_form.addRow("Diarization", self.diarize)
+        speech_form.addRow(
+            "", QLabel(
+                "Dual-track capture already labels speakers for one-on-one calls.\n"
+                "Diarization only matters when several people share one stream."
+            )
+        )
+
+        model = QWidget()
+        model_form = QFormLayout(model)
+        model_form.addRow("", QLabel("Server and model selection live in the Models tab."))
+        model_form.addRow("Temperature", self.temperature)
+        model_form.addRow("", self.keep_loaded)
+        model_form.addRow("Summary prompt", self.summary_prompt)
+        model_form.addRow("Actions prompt", self.actions_prompt)
+
+        self.diagnostics = QPlainTextEdit()
+        self.diagnostics.setReadOnly(True)
+        self.diagnostics.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        refresh_diag = QPushButton("Refresh")
+        refresh_diag.clicked.connect(self.refresh_diagnostics)
+        copy_diag = QPushButton("Copy")
+        copy_diag.clicked.connect(self.copy_diagnostics)
+        diag_buttons = QHBoxLayout()
+        diag_buttons.addWidget(refresh_diag)
+        diag_buttons.addWidget(copy_diag)
+        diag_buttons.addStretch()
+        diagnostics = QWidget()
+        diag_layout = QVBoxLayout(diagnostics)
+        diag_layout.addWidget(self.diagnostics)
+        diag_layout.addLayout(diag_buttons)
+
+        tabs = QTabWidget()
+        tabs.addTab(general, "General")
+        tabs.addTab(speech, "Speech")
+        tabs.addTab(model, "Language model")
+        tabs.addTab(diagnostics, "Diagnostics")
+        tabs.currentChanged.connect(
+            lambda i: self.refresh_diagnostics() if tabs.tabText(i) == "Diagnostics" else None
+        )
+
+        save = QPushButton("Save")
+        save.clicked.connect(self.save)
+        reset = QPushButton("Reset prompts")
+        reset.clicked.connect(self.reset_prompts)
+        self.status = QLabel("")
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(save)
+        buttons.addWidget(reset)
+        buttons.addWidget(self.status)
+        buttons.addStretch()
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(tabs)
+        layout.addLayout(buttons)
+
+    def pick_folder(self):
+        chosen = QFileDialog.getExistingDirectory(self, "Output folder", self.data_dir.text())
+        if chosen:
+            self.data_dir.setText(chosen)
+
+    def refresh_diagnostics(self):
+        """Everything the CLI subcommands report, in one pasteable block."""
+        lines = []
+        report = hardware.report(self.cfg)
+        width = max(len(k) for k in report)
+        lines.append("== environment ==")
+        lines += [f"{k.ljust(width)}  {v}" for k, v in report.items()]
+
+        lines.append("\n== gpu ==")
+        rows = hardware.cuda_diagnostics()
+        gwidth = max(len(k) for k, _ in rows)
+        lines += [f"{k.ljust(gwidth)}  {v}" for k, v in rows]
+        lines.append(hardware.cuda_state()["detail"])
+
+        lines.append("\n== capture ==")
+        lines.append(f"command  {self.cfg.capture.record_cmd}")
+        for source in audio.list_sources():
+            role = ""
+            if source.target == self.cfg.capture.mic_source:
+                role = f" -> {self.cfg.capture.mic_label}"
+            elif source.target == self.cfg.capture.system_source:
+                role = f" -> {self.cfg.capture.system_label}"
+            lines.append(f"[{source.kind:6}] {source.label}{role}")
+            lines.append(f"          {source.name} (target {source.target})")
+        if not audio.list_sources():
+            lines.append("no sources found")
+
+        lines.append("\n== language ==")
+        lines.append(f"mode {self.cfg.asr.language_mode}, languages {self.cfg.asr.languages}")
+
+        lines.append("\n== output ==")
+        lines.append(str(self.cfg.root))
+        self.diagnostics.setPlainText("\n".join(lines))
+
+    def copy_diagnostics(self):
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.clipboard().setText(self.diagnostics.toPlainText())
+
+    def refresh_gpu(self):
+        state = hardware.cuda_state()
+        names = ", ".join(g["name"] for g in state["gpus"])
+        self.gpu_status.setText(f"{state['detail']}" + (f"\n{names}" if names else ""))
+        self.gpu_button.setVisible(state["installable"])
+        self.gpu_button.setText("Install GPU support (about 1.4 GB)")
+
+    def _append_gpu_log(self, line: str):
+        self.gpu_output.show()
+        self.gpu_output.appendPlainText(line)
+        if line.startswith("installed"):
+            self.refresh_gpu()
+
+    def install_gpu(self):
+        confirm = QMessageBox.question(
+            self,
+            "Install GPU support",
+            "Download the CUDA libraries (about 1.4 GB) into this project?\n\n"
+            "meetnotes needs a restart afterwards to use them.",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self.gpu_button.setEnabled(False)
+        self.gpu_output.clear()
+        self.gpu_output.show()
+
+        def run():
+            ok = hardware.install_cuda(log=self.gpu_log.emit)
+            if not ok:
+                self.gpu_log.emit("install failed")
+            self.gpu_log.emit("")
+
+        threading.Thread(target=run, daemon=True, name="cuda-install").start()
+
+    def reset_prompts(self):
+        self.summary_prompt.setPlainText(prompts.SUMMARY)
+        self.actions_prompt.setPlainText(prompts.ACTIONS)
+
+    def save(self):
+        cfg = self.cfg
+        cfg.data_dir = self.data_dir.text().strip()
+        cfg.auto_process = self.auto.isChecked()
+        cfg.start_in_tray = self.start_in_tray.isChecked()
+        cfg.minimize_on_quit = self.minimize_on_quit.isChecked()
+        cfg.asr.profile = self.profile.currentText()
+        mode, codes = self.language.currentData()
+        cfg.asr.language_mode = mode
+        cfg.asr.languages = list(codes)
+        cfg.asr.language = codes[0] if codes else ""
+        cfg.asr.multilingual = self.multilingual.isChecked()
+        cfg.llm.temperature = self.temperature.value()
+        cfg.llm.keep_asr_loaded = self.keep_loaded.isChecked()
+        cfg.llm.summary_prompt = self.summary_prompt.toPlainText().strip()
+        cfg.llm.actions_prompt = self.actions_prompt.toPlainText().strip()
+        cfg.save()
+        self.window.reload()
+        resolved = hardware.plan(cfg)
+        self.status.setText(
+            f"Saved. Profile {resolved['profile']}, live {resolved['live_model']}, "
+            f"final {resolved['final_model'] or '(skipped)'} on {resolved['device']}."
+        )
+
+
+class ModelsScreen(QWidget):
+    """One model choice per step, offering only what fits that step."""
+
+    def __init__(self, cfg, session, window):
+        super().__init__()
+        self.cfg = cfg
+        self.window = window
+
+        self.gpu = QLabel("")
+        bold = self.gpu.font()
+        bold.setBold(True)
+        self.gpu.setFont(bold)
+
+        self.live = QComboBox()
+        self.final = QComboBox()
+        self.precision = QComboBox()
+        self.summary = QComboBox()
+        self.summary.setEditable(True)
+
+        self.live_note = self._note()
+        self.final_note = self._note()
+        self.summary_note = self._note()
+        theme.comfortable(self.live, self.final, self.precision, self.summary)
+
+        speech = QWidget()
+        speech_form = QFormLayout(speech)
+        speech_form.addRow("Live transcription", self.live)
+        speech_form.addRow("", self.live_note)
+        speech_form.addRow("Final pass", self.final)
+        speech_form.addRow("", self.final_note)
+        speech_form.addRow("Precision", self.precision)
+        speech_form.addRow("", self._note(
+            "int8 roughly halves the memory of float16 with little quality cost."
+        ))
+
+        self.provider = QComboBox()
+        self.provider.addItem("Custom", "")
+        for preset in llm.PRESETS:
+            self.provider.addItem(preset["name"], preset["name"])
+        self.provider.activated.connect(self.apply_preset)
+        self.base_url = QLineEdit(cfg.llm.base_url)
+        self.api_key = QLineEdit(cfg.llm.api_key)
+        self.ttl = QSpinBox()
+        self.ttl.setRange(0, 86400)
+        self.ttl.setSuffix(" s")
+        self.ttl.setValue(cfg.llm.ttl_seconds)
+        self.free_vram = QCheckBox("Unload language models before recording starts")
+        self.free_vram.setChecked(cfg.llm.free_vram_before_recording)
+        theme.comfortable(self.provider, self.base_url, self.api_key, self.ttl)
+        fetch = QPushButton("Fetch models")
+        fetch.clicked.connect(self.fetch)
+        unload = QPushButton("Unload now")
+        unload.clicked.connect(self.unload_now)
+        server_row = QHBoxLayout()
+        server_row.addWidget(fetch)
+        server_row.addWidget(unload)
+        server_row.addStretch()
+
+        summarize = QWidget()
+        summarize_form = QFormLayout(summarize)
+        summarize_form.addRow("Provider", self.provider)
+        summarize_form.addRow("Base URL", self.base_url)
+        summarize_form.addRow("API key", self.api_key)
+        summarize_form.addRow("Summary and actions", self.summary)
+        summarize_form.addRow("", self.summary_note)
+        summarize_form.addRow("Idle unload", self.ttl)
+        summarize_form.addRow("", self._note(
+            "LM Studio unloads a model after this long idle. 0 disables it; other "
+            "servers ignore the field."
+        ))
+        summarize_form.addRow("", self.free_vram)
+        summarize_form.addRow("", server_row)
+
+        save = QPushButton("Save")
+        save.clicked.connect(self.save)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.reload)
+        gguf = QPushButton("Why not the GGUF whisper models?")
+        gguf.clicked.connect(
+            lambda: QMessageBox.information(self, "GGUF speech models", models.gguf_note())
+        )
+        buttons = QHBoxLayout()
+        buttons.addWidget(save)
+        buttons.addWidget(refresh)
+        buttons.addWidget(gguf)
+        buttons.addStretch()
+        self.status = QLabel("")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.gpu)
+        layout.addWidget(QLabel("Speech"))
+        layout.addWidget(speech)
+        layout.addWidget(QLabel("Summarization"))
+        layout.addWidget(summarize)
+        layout.addLayout(buttons)
+        layout.addWidget(self.status)
+        layout.addStretch()
+        self.reload()
+
+    def _note(self, text: str = "") -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        theme.muted(label)
+        return label
+
+    def _fill_whisper(self, combo: QComboBox, current: str, allow_skip: bool):
+        combo.blockSignals(True)
+        combo.clear()
+        if allow_skip:
+            combo.addItem("Skip the final pass, keep the live transcript", "")
+        for choice in models.whisper_choices():
+            combo.addItem(f"{choice['repo']}  -  {choice['note']}", choice["alias"])
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def reload(self):
+        plan = hardware.plan(self.cfg)
+        gpus = hardware.nvidia()
+        if gpus:
+            self.gpu.setText(
+                f"{gpus[0]['name']} - {gpus[0]['vram_mb']} MB, "
+                f"{gpus[0].get('used_mb', 0)} MB in use, running on {plan['device']}"
+            )
+        else:
+            self.gpu.setText(f"No GPU detected, running on {plan['device']}")
+
+        self._fill_whisper(self.live, self.cfg.asr.live_model or plan["live_model"], False)
+        self._fill_whisper(
+            self.final,
+            "" if not self.cfg.asr.final_pass else (self.cfg.asr.final_model or plan["final_model"]),
+            True,
+        )
+        self.live_note.setText(
+            "Runs on short windows while the meeting happens. Speed matters more than accuracy."
+        )
+        self.final_note.setText(
+            "Runs once over the whole recording afterwards. This produces the saved transcript."
+        )
+
+        self.precision.blockSignals(True)
+        self.precision.clear()
+        self.precision.addItem("Automatic", "auto")
+        for name in models.compute_types(plan["device"]):
+            self.precision.addItem(name, name)
+        index = self.precision.findData(self.cfg.asr.compute_type)
+        self.precision.setCurrentIndex(index if index >= 0 else 0)
+        self.precision.blockSignals(False)
+
+        self.fetch(quiet=True)
+
+    def apply_preset(self, index: int):
+        name = self.provider.itemData(index)
+        if not name or not llm.apply_preset(self.cfg, name):
+            return
+        self.base_url.setText(self.cfg.llm.base_url)
+        self.api_key.setText(self.cfg.llm.api_key)
+        self.ttl.setValue(self.cfg.llm.ttl_seconds)
+        note = next(p["note"] for p in llm.PRESETS if p["name"] == name)
+        self.summary_note.setText(note)
+        self.fetch(quiet=True)
+
+    def fetch(self, quiet: bool = False):
+        self.cfg.llm.base_url = self.base_url.text().strip()
+        self.cfg.llm.api_key = self.api_key.text().strip()
+        try:
+            entries = [e for e in llm.catalog(self.cfg) if models.is_language_model(e)]
+        except llm.LlmError as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Cannot reach the model server", str(exc))
+            self.summary_note.setText(f"Not reachable at {self.cfg.llm.base_url}")
+            return
+
+        current = self.cfg.llm.model or self.summary.currentText()
+        self.summary.blockSignals(True)
+        self.summary.clear()
+        for entry in entries:
+            label = entry["id"]
+            extras = [part for part in (entry.get("quantization"), entry.get("state")) if part]
+            if extras:
+                label += "  -  " + ", ".join(extras)
+            self.summary.addItem(label, entry["id"])
+        index = self.summary.findData(current)
+        if index >= 0:
+            self.summary.setCurrentIndex(index)
+        elif current:
+            self.summary.setCurrentText(current)
+        self.summary.blockSignals(False)
+        if entries:
+            self.summary_note.setText(f"{len(entries)} models offered by this server")
+
+    def unload_now(self):
+        freed, detail = llm.unload_all()
+        self.status.setText(detail if freed else f"could not unload: {detail}")
+
+    def save(self):
+        cfg = self.cfg
+        cfg.asr.live_model = self.live.currentData() or ""
+        final = self.final.currentData()
+        cfg.asr.final_pass = bool(final)
+        cfg.asr.final_model = final or ""
+        cfg.asr.compute_type = self.precision.currentData() or "auto"
+        cfg.llm.base_url = self.base_url.text().strip()
+        cfg.llm.api_key = self.api_key.text().strip()
+        cfg.llm.model = self.summary.currentData() or self.summary.currentText().strip()
+        cfg.llm.ttl_seconds = self.ttl.value()
+        cfg.llm.free_vram_before_recording = self.free_vram.isChecked()
+        cfg.save()
+        self.window.reload()
+        self.status.setText("Saved.")
+
+
+class MainWindow(QWidget):
+    def __init__(self, cfg, session):
+        super().__init__()
+        self.cfg = cfg
+        self.session = session
+        self.setWindowTitle("meetnotes")
+        self.resize(1000, 640)
+
+        self.record = RecordScreen(cfg, session, self)
+        self.library = LibraryScreen(cfg, session, self)
+        self.models = ModelsScreen(cfg, session, self)
+        self.settings = SettingsScreen(cfg, session, self)
+
+        self.stack = QTabWidget()
+        self.stack.addTab(self.record, "Record")
+        self.stack.addTab(self.library, "Library")
+        self.stack.addTab(self.models, "Models")
+        self.stack.addTab(self.settings, "Settings")
+        self.stack.currentChanged.connect(self._on_tab)
+
+        self.banner = QLabel("")
+        self.banner.setWordWrap(True)
+        self.banner.setContentsMargins(8, 6, 8, 6)
+        theme.notice(self.banner)
+        self.banner.hide()
+
+        self.status = QLabel("Ready")
+        theme.muted(self.status)
+        self.stack.setCornerWidget(self.status)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.banner)
+        layout.addWidget(self.stack)
+
+    def _on_tab(self, index: int):
+        widget = self.stack.widget(index)
+        if widget is self.library:
+            self.library.reload()
+        elif widget is self.models:
+            self.models.reload()
+
+    def show_banner(self, text: str):
+        self.banner.setText(text)
+        self.banner.show()
+
+    def show_screen(self, index: int):
+        self.stack.setCurrentIndex(index)
+
+    def closeEvent(self, event):
+        """Closing hides to the tray unless the user asked for a real quit."""
+        from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+
+        if self.cfg.minimize_on_quit and QSystemTrayIcon.isSystemTrayAvailable():
+            event.ignore()
+            self.hide()
+            return
+        event.accept()
+        QApplication.quit()
+
+    def reload(self):
+        self.record.reload()
+        self.record.refresh_engine()
+        self.library.reload()
+        self.models.reload()
+
+    def surface(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def start_from_tray(self):
+        if self.session.recording:
+            return
+        try:
+            self.session.start("meeting")
+        except Exception as exc:
+            self.surface()
+            QMessageBox.critical(self, "Cannot record", str(exc))
+            return
+        self.record.timer.start()
+        self.record.button.setText("Stop")
+
+    def on_state(self, state: str, detail: str):
+        self.status.setText(f"{state}: {detail}" if detail else state)
+        if state in ("done", "failed", "idle"):
+            self.record.button.setText("Start recording")
+            self.record.timer.stop()
+            self.library.reload()
