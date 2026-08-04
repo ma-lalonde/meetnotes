@@ -21,8 +21,28 @@ def sha(*parts) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+_hash_cache: dict[tuple, str] = {}
+
+
 def file_hash(path: Path) -> str:
-    return sha(path.read_bytes())
+    """Cached on size and mtime, so the Library can refresh often.
+
+    Without this, listing meetings re-reads every artifact of every meeting,
+    which is too slow to run on a one-second timer.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return sha(b"")
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _hash_cache.get(key)
+    if cached is not None:
+        return cached
+    digest = sha(path.read_bytes())
+    if len(_hash_cache) > 2000:
+        _hash_cache.clear()
+    _hash_cache[key] = digest
+    return digest
 
 
 def status(root: Path, meta: dict, name: str, fingerprint: str) -> str:

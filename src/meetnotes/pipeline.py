@@ -66,6 +66,8 @@ def process(path: Path, cfg, force: bool = False, with_llm: bool = True, progres
         store.update_meta(path, state="transcribing", error="")
         segments = transcribe(path, cfg, force=force, progress=progress)
         meta = store.read_meta(path)
+        if progress:
+            progress("writing transcripts")
 
         base = artifacts.sha(segments, meta.get("notes", []), meta.get("run", {}))
         report["transcription.md"] = artifacts.ensure(

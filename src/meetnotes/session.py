@@ -20,6 +20,8 @@ class Session:
         self.live: list[dict] = []
         self.notes: list[dict] = []
         self.started_at = 0.0
+        # Meeting id -> what it is doing right now, for the Library to show.
+        self.active: dict[str, str] = {}
 
     @property
     def recording(self) -> bool:
@@ -124,19 +126,22 @@ class Session:
         return path
 
     def process_async(self, path: Path, force: bool = False) -> None:
+        def step(name: str) -> None:
+            self.active[path.name] = name
+            self.on_state("processing", f"{path.name}: {name}")
+
         def run():
             try:
-                self.on_state("processing", path.name)
-                report = pipeline.process(
-                    path, self.cfg, force=force,
-                    progress=lambda step: self.on_state("processing", f"{path.name}: {step}"),
-                )
+                step("starting")
+                report = pipeline.process(path, self.cfg, force=force, progress=step)
                 self.on_state("done", f"{path.name}: {_summarise(report)}")
             except store.Busy:
                 self.on_state("idle", f"{path.name} already running")
             except Exception as exc:
                 store.update_meta(path, state="failed", error=f"{type(exc).__name__}: {exc}")
                 self.on_state("failed", f"{path.name}: {exc}")
+            finally:
+                self.active.pop(path.name, None)
 
         threading.Thread(target=run, daemon=True, name="finalizer").start()
 

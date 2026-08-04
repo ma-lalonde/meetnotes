@@ -290,18 +290,43 @@ class LibraryScreen(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.table)
         layout.addLayout(buttons)
+
+        # A running job writes its state to disk, but nothing tells the table.
+        # Poll only while something is actually running.
+        self.ticker = QTimer(self)
+        self.ticker.setInterval(1000)
+        self.ticker.timeout.connect(self._tick)
+        self.reload()
+
+    RUNNING_STATES = {"recording", "transcribing", "summarizing", "pending"}
+
+    def _tick(self):
+        # reload() stops the timer itself once nothing is running, so this
+        # avoids scanning the meetings directory twice per tick.
         self.reload()
 
     def reload(self):
         meetings = store.list_meetings(self.cfg.root)
         self.table.setRowCount(len(meetings))
+        running = False
         for row, meta in enumerate(meetings):
+            state = meta.get("state", "")
+            step = self.session.active.get(meta["id"], "")
+            if step:
+                state = f"{state} - {step}"
+                running = True
+            elif state in self.RUNNING_STATES:
+                running = True
             self.table.setItem(row, 0, QTableWidgetItem(meta["id"]))
-            self.table.setItem(row, 1, QTableWidgetItem(meta.get("state", "")))
+            self.table.setItem(row, 1, QTableWidgetItem(state))
             self.table.setItem(row, 2, QTableWidgetItem(outputs.clock(meta.get("duration", 0))))
             self.table.setItem(row, 3, QTableWidgetItem(self._artifact_summary(meta)))
             self.table.setItem(row, 4, QTableWidgetItem(meta.get("error", "")[:60]))
             self.table.item(row, 0).setData(Qt.UserRole, meta["path"])
+        if running and not self.ticker.isActive():
+            self.ticker.start()
+        elif not running and self.ticker.isActive():
+            self.ticker.stop()
 
     def _artifact_summary(self, meta: dict) -> str:
         path = Path(meta["path"])
@@ -327,6 +352,7 @@ class LibraryScreen(QWidget):
     def run(self, force: bool):
         path = self.selected()
         if not path:
+            QMessageBox.information(self, "No meeting selected", "Pick a row first.")
             return
         if force:
             confirm = QMessageBox.question(
@@ -900,7 +926,9 @@ class MainWindow(QWidget):
 
     def on_state(self, state: str, detail: str):
         self.status.setText(f"{state}: {detail}" if detail else state)
+        # Every transition, not just the terminal ones: the Library is the only
+        # place that shows a job is still running.
+        self.library.reload()
         if state in ("done", "failed", "idle"):
             self.record.button.setText("Start recording")
             self.record.timer.stop()
-            self.library.reload()
