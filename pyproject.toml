@@ -3,6 +3,8 @@ name = "meetnotes"
 version = "0.1.0"
 description = "Local meeting recorder with live transcription, timestamped notes, and local LLM summaries"
 requires-python = ">=3.11,<3.14"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 dependencies = [
     "faster-whisper>=1.2.0",
     "httpx>=0.28",
