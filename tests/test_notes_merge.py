@@ -33,12 +33,13 @@ SEGMENTS = [
 
 def test_notes_land_in_time_order():
     merged = outputs.merge_notes(SEGMENTS, META["notes"])
-    # The note at 61.0 falls inside the 60.0-64.0 segment, so that segment is
-    # cut in two around it. Without word timestamps the cut is proportional.
+    # The note at 61.0 sits one quarter into the 60.0-64.0 segment. Cutting
+    # there would strand a fragment, so the note goes ahead of the whole
+    # sentence instead.
     assert [item["kind"] for item in merged] == [
-        "speech", "note", "speech", "speech", "note", "speech"
+        "speech", "note", "speech", "note", "speech"
     ]
-    assert [item["start"] for item in merged][:3] == [0.0, 5.0, 6.0]
+    assert [item["start"] for item in merged] == [0.0, 5.0, 6.0, 61.0, 60.0]
 
 
 def test_a_note_at_a_segment_start_still_follows_it():
@@ -74,8 +75,9 @@ def test_rendered_file_is_cleaned():
 
 def test_speaker_heading_reappears_after_a_note():
     text = outputs.render_transcript_with_notes(META, SEGMENTS)
-    # Once at the start, once after each note that interrupts Me speaking.
-    assert text.count("**Me**") == 3
+    # Me speaks, Them answers, a note, then Me again: two headings for Me.
+    assert text.count("**Me**") == 2
+    assert text.count("**Them**") == 1
 
 
 def test_llm_source_interleaves_and_labels_notes():

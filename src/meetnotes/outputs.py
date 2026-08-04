@@ -93,16 +93,76 @@ def render_notes(meta: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def split_segment(segment: dict, at: float) -> tuple[dict, dict] | None:
+# A cut leaving less than this share on either side is not worth making; the
+# sentence reads better whole, placed on the side where most of it was said.
+MIN_SPLIT_SHARE = 0.25
+# How far back to look for a clause boundary, in seconds, and how far forward.
+# Asymmetric on purpose: a clause that ended before the note may well be what
+# prompted it, but cutting at a clause that ends well after would place the
+# note ahead of words that had not been spoken when it was typed.
+PUNCTUATION_LOOKBACK = 2.5
+PUNCTUATION_LOOKAHEAD = 1.0
+CLAUSE_END = (",", ";", ":", ".", "!", "?", "…")
+
+
+def _clause_boundary(words: list, at: float) -> int | None:
+    """Index of the word boundary nearest `at` that ends a clause."""
+    best = None
+    for index, word in enumerate(words[:-1]):
+        if not word[2].strip().endswith(CLAUSE_END):
+            continue
+        offset = word[1] - at
+        if not (-PUNCTUATION_LOOKBACK <= offset <= PUNCTUATION_LOOKAHEAD):
+            continue
+        if best is None or abs(offset) < best[0]:
+            best = (abs(offset), index + 1)
+    return best[1] if best else None
+
+
+def _text_boundary(text: str, fraction: float) -> int | None:
+    """Character offset to cut at, preferring the nearest clause end."""
+    target = int(len(text) * fraction)
+    best = None
+    for index, char in enumerate(text):
+        if char in CLAUSE_END and index + 1 < len(text):
+            distance = abs(index + 1 - target)
+            if best is None or distance < best[0]:
+                best = (distance, index + 1)
+    # Only trust punctuation that is reasonably close to where the note landed.
+    if best and best[0] <= len(text) * 0.2:
+        return best[1]
+    space = text.rfind(" ", 0, target)
+    if space <= 0:
+        space = text.find(" ", target)
+    return space if space > 0 else None
+
+
+def note_side(segment: dict, at: float) -> str:
+    """Which side of a note an unsplit segment belongs on."""
+    span = segment["end"] - segment["start"]
+    if span <= 0:
+        return "after"
+    return "before" if (at - segment["start"]) / span < 0.5 else "after"
+
+
+def split_segment(segment: dict, at: float, min_share: float = MIN_SPLIT_SHARE) -> tuple[dict, dict] | None:
     """Cut a segment in two at a moment inside it.
 
-    The cut falls after the last word that had finished being spoken. A word
-    still in progress when the note was typed belongs to the part after it,
-    because the note cannot have been reacting to a word not yet heard.
+    Two rules decide where, and whether, to cut.
 
-    Word timestamps from the final pass give the real boundary. Without them
-    the split is proportional to elapsed time and snapped to a word gap, which
-    is approximate but never lands mid-word.
+    A clause end near the note wins: cutting at a comma or a full stop reads
+    far better than cutting after whatever word happened to be finishing.
+    Failing that, the cut falls after the last word that had finished being
+    spoken, since the note cannot be reacting to a word not yet heard.
+
+    If either side would end up smaller than min_share of the sentence, no cut
+    is made at all. A one-word fragment is worse than a sentence sitting
+    slightly out of position, so the caller places it whole on the side where
+    most of it was said.
+
+    Word timestamps from the final pass give real boundaries. Without them the
+    same rules apply over character offsets, which is approximate but never
+    lands mid-word.
     """
     start, end = segment["start"], segment["end"]
     if not (start < at < end):
@@ -110,8 +170,13 @@ def split_segment(segment: dict, at: float) -> tuple[dict, dict] | None:
 
     words = segment.get("words")
     if words:
-        head = [w for w in words if w[1] <= at]
-        tail = [w for w in words if w[1] > at]
+        index = _clause_boundary(words, at)
+        if index is None:
+            index = sum(1 for w in words if w[1] <= at)
+        share = index / len(words)
+        if min(share, 1.0 - share) < min_share:
+            return None
+        head, tail = words[:index], words[index:]
         if not head or not tail:
             return None
         before_text = "".join(w[2] for w in head).strip()
@@ -120,14 +185,14 @@ def split_segment(segment: dict, at: float) -> tuple[dict, dict] | None:
     else:
         text = segment["text"]
         fraction = (at - start) / (end - start)
-        cut = int(len(text) * fraction)
-        space = text.rfind(" ", 0, cut)
-        if space <= 0:
-            space = text.find(" ", cut)
-        if space <= 0:
+        cut = _text_boundary(text, fraction)
+        if cut is None:
             return None
-        before_text, after_text = text[:space].strip(), text[space:].strip()
-        boundary = at
+        share = cut / len(text)
+        if min(share, 1.0 - share) < min_share:
+            return None
+        before_text, after_text = text[:cut].strip(), text[cut:].strip()
+        boundary = round(start + (end - start) * share, 2)
 
     if not before_text or not after_text:
         return None
@@ -170,6 +235,12 @@ def merge_notes(segments: list[dict], notes: list[dict]) -> list[dict]:
             timeline.append({"kind": "note", "start": inside["at"], "text": inside["text"]})
             queue.insert(index, after)
             continue
+
+        if inside and note_side(segment, inside["at"]) == "before":
+            # Splitting would strand a fragment, and most of the sentence comes
+            # after the note, so the note goes ahead of the whole thing.
+            pending.remove(inside)
+            timeline.append({"kind": "note", "start": inside["at"], "text": inside["text"]})
 
         timeline.append({**segment, "kind": "speech"})
         while pending and pending[0]["at"] <= segment["end"]:

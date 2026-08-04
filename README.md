@@ -156,10 +156,18 @@ does it badly. The prompt states that NOTE lines were never spoken aloud.
 
 A note typed mid-sentence **splits that sentence**, so it sits between what
 prompted it and what followed rather than after the whole utterance. The final
-pass records word timestamps, so the cut falls after the last word that had
-finished being spoken - a word still in progress belongs after the note, since
-the note cannot be reacting to a word not yet heard. The remainder is prefixed
-with `...` to show the sentence carries on.
+pass records word timestamps, which makes two rules possible:
+
+- **Cut at a clause end.** A comma or full stop near the note is preferred over
+  whatever word happened to be finishing. The search looks up to 2.5s back but
+  only 1s forward, so a note is never placed ahead of words that had not been
+  spoken when it was typed.
+- **Do not cut off scraps.** If either side would be under a quarter of the
+  sentence, no cut is made. The sentence stays whole and the note goes on the
+  side where most of it was said - before it if the note came early, after it if
+  late. A one-word fragment reads worse than a sentence slightly out of place.
+
+Where a cut does happen, the remainder is prefixed with `...`.
 
 **Re-running is safe.** Each artifact records a fingerprint of its inputs and a
 hash of what was written. Unchanged inputs are skipped, changed inputs
