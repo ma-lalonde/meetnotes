@@ -24,8 +24,26 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-META = "meeting.json"
-LOCK = "meeting.lock"
+RAW = "raw_output"
+META = f"{RAW}/meeting.json"
+LOCK = f"{RAW}/meeting.lock"
+# Where these lived before the raw_output layout.
+LEGACY_META = "meeting.json"
+LEGACY_LOCK = "meeting.lock"
+
+
+def meta_path(path: Path) -> Path:
+    """Current location, falling back to the old one so a meeting recorded
+    before the layout change is still recognised."""
+    current = path / META
+    if current.exists():
+        return current
+    legacy = path / LEGACY_META
+    return legacy if legacy.exists() else current
+
+
+def is_meeting(path: Path) -> bool:
+    return (path / META).exists() or (path / LEGACY_META).exists()
 
 _process_locks: dict[str, threading.Lock] = {}
 _registry_lock = threading.Lock()
@@ -81,6 +99,7 @@ def new_meeting(root: Path, title: str) -> Path:
         path = root / f"{stamp}_{slugify(title)}-{suffix}"
         suffix += 1
     (path / "audio").mkdir(parents=True)
+    (path / RAW).mkdir(parents=True)
     write_meta(
         path,
         {
@@ -100,11 +119,15 @@ def new_meeting(root: Path, title: str) -> Path:
 
 
 def read_meta(path: Path) -> dict:
-    return json.loads((path / META).read_text(encoding="utf-8"))
+    return json.loads(meta_path(path).read_text(encoding="utf-8"))
 
 
 def write_meta(path: Path, meta: dict) -> None:
     write_atomic(path / META, json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+    # Written in the new place, so the old copy is now stale.
+    legacy = path / LEGACY_META
+    if legacy.exists():
+        legacy.unlink()
 
 
 def update_meta(path: Path, **changes) -> dict:
@@ -119,7 +142,7 @@ def list_meetings(root: Path) -> list[dict]:
         return []
     out = []
     for child in sorted(root.iterdir(), reverse=True):
-        if not child.is_dir() or not (child / META).exists():
+        if not child.is_dir() or not is_meeting(child):
             continue
         try:
             meta = read_meta(child)
@@ -150,9 +173,12 @@ def exclusive(path: Path):
 
     handle = None
     try:
+        lock = path / LOCK
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        (path / LEGACY_LOCK).unlink(missing_ok=True)
         # Append mode: opening must not truncate, or the lock file's mtime
         # churns on every run and the meeting folder never looks unchanged.
-        handle = (path / LOCK).open("a")
+        handle = lock.open("a")
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:

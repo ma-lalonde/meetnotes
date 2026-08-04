@@ -48,7 +48,7 @@ def snapshot(path):
     return {
         p.relative_to(path).as_posix(): (p.stat().st_mtime_ns, p.read_bytes())
         for p in sorted(path.rglob("*"))
-        if p.is_file() and p.name not in (store.META, store.LOCK)
+        if p.is_file() and p.name not in ("meeting.json", "meeting.lock")
     }
 
 
@@ -61,11 +61,11 @@ def test_first_run_writes_then_second_run_skips(meeting):
     assert first[RAW_TRANSCRIPT] == "written"
 
     before = snapshot(path)
-    before_meta = (path / store.META).read_bytes()
+    before_meta = store.meta_path(path).read_bytes()
     second = pipeline.process(path, cfg, with_llm=False)
     assert set(second.values()) == {"skipped"}
     assert snapshot(path) == before
-    assert (path / store.META).read_bytes() == before_meta
+    assert store.meta_path(path).read_bytes() == before_meta
 
 
 def test_no_temp_files_and_no_duplicates(meeting):
@@ -158,6 +158,45 @@ def test_migration_preserves_hand_edits(meeting):
     assert (path / RAW_TRANSCRIPT).read_text() == "my own words\n"
     assert report[RAW_TRANSCRIPT] == "hand-edited"
     assert not (path / "transcription.md").exists()
+
+
+def test_meeting_json_lives_in_raw_output(meeting):
+    cfg, path = meeting
+    assert (path / "raw_output/meeting.json").exists()
+    assert not (path / "meeting.json").exists()
+
+
+def test_a_meeting_with_the_old_meta_location_is_still_found(tmp_path):
+    cfg = Config()
+    cfg.data_dir = str(tmp_path)
+    cfg.asr.final_pass = False
+    path = store.new_meeting(tmp_path, "legacy")
+    (path / "raw_output/meeting.json").replace(path / "meeting.json")
+
+    assert store.is_meeting(path)
+    assert store.read_meta(path)["title"] == "legacy"
+    assert [m["id"] for m in store.list_meetings(cfg.root)] == [path.name]
+
+
+def test_writing_meta_relocates_it_and_drops_the_old_copy(tmp_path):
+    path = store.new_meeting(tmp_path, "legacy")
+    (path / "raw_output/meeting.json").replace(path / "meeting.json")
+
+    store.update_meta(path, state="pending")
+
+    assert (path / "raw_output/meeting.json").exists()
+    assert not (path / "meeting.json").exists()
+
+
+def test_an_empty_artifact_is_regenerated_not_skipped(meeting):
+    cfg, path = meeting
+    pipeline.process(path, cfg, with_llm=False)
+    # A failed run that wrote nothing must not be recorded as valid forever.
+    (path / RAW_TRANSCRIPT).write_text("")
+
+    report = pipeline.process(path, cfg, with_llm=False)
+    assert report[RAW_TRANSCRIPT] == "written"
+    assert (path / RAW_TRANSCRIPT).read_text().strip()
 
 
 def test_second_caller_gets_busy_not_a_duplicate_run(meeting):

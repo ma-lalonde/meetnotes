@@ -65,6 +65,11 @@ def status(root: Path, meta: dict, name: str, fingerprint: str) -> str:
     record = meta.get("artifacts", {}).get(name)
     if not path.exists() or not record:
         return MISSING
+    # An empty generated file is never a valid result. Treating it as fresh
+    # would make a failed run permanent: the fingerprint matches, so it is
+    # skipped forever and only --force ever tries again.
+    if path.stat().st_size == 0 or not path.read_bytes().strip():
+        return MISSING
     if file_hash(path) != record.get("output_hash"):
         return EDITED
     return FRESH if record.get("fingerprint") == fingerprint else STALE

@@ -244,6 +244,47 @@ def cmd_ui(cfg, args) -> int:
     return run(cfg, check=args.check, platform=args.platform)
 
 
+def cmd_prompt(cfg, args) -> int:
+    """Show exactly what would be sent to the language model."""
+    from . import outputs, prompts
+
+    path = Path(args.meeting).expanduser().resolve()
+    if not store.is_meeting(path):
+        print(f"not a meeting folder: {path}")
+        return 1
+
+    meta = store.read_meta(path)
+    segments = meta.get("segments", [])
+    notes = meta.get("notes", [])
+    spoken = [s for s in segments if outputs.clean_text(s.get("text", ""))]
+
+    print(f"segments stored      {len(segments)}")
+    print(f"segments with speech {len(spoken)}")
+    print(f"notes                {len(notes)}")
+    print(f"tracks               {meta.get('tracks', {})}")
+    print(f"state                {meta.get('state')}  {meta.get('error', '')}")
+    print(f"model                {cfg.llm.model or '(none selected)'} at {cfg.llm.base_url}")
+
+    system = cfg.llm.actions_prompt if args.which == "actions" else cfg.llm.summary_prompt
+    user = outputs.transcript_for_llm(meta, segments)
+    print(f"\nsystem prompt        {len(system)} characters")
+    print(f"transcript sent      {len(user)} characters")
+    if not spoken:
+        print("\nNOTHING TO SUMMARIZE: no transcript segments carry any speech.")
+        print("The language model is not the problem; transcription produced nothing.")
+
+    if args.full:
+        print("\n" + "=" * 60 + "\nSYSTEM\n" + "=" * 60)
+        print(system)
+        print("\n" + "=" * 60 + "\nUSER\n" + "=" * 60)
+        print(user)
+    else:
+        print("\nfirst 800 characters of what would be sent:\n")
+        print(user[:800] or "(empty)")
+        print("\nre-run with --full to see all of it")
+    return 0
+
+
 def cmd_vocabulary(cfg, args) -> int:
     terms = list(cfg.asr.vocabulary)
     if args.clear:
@@ -344,7 +385,7 @@ def _print_report(path, report: dict) -> None:
 
 def cmd_process(cfg, args) -> int:
     path = Path(args.meeting).expanduser().resolve()
-    if not (path / store.META).exists():
+    if not store.is_meeting(path):
         print(f"not a meeting folder: {path}")
         return 1
     try:
@@ -395,6 +436,11 @@ def main(argv=None) -> int:
     ui.add_argument("--check", action="store_true", help="build every screen offscreen and exit")
     ui.add_argument("--platform", default="", help="override QT_QPA_PLATFORM, e.g. xcb or wayland")
 
+    shown = subs.add_parser("prompt", help="show what would be sent to the language model")
+    shown.add_argument("meeting")
+    shown.add_argument("--which", choices=["summary", "actions"], default="summary")
+    shown.add_argument("--full", action="store_true")
+
     vocab = subs.add_parser("vocabulary", help="names and jargon to expect in speech")
     vocab.add_argument("--add", nargs="+", default=[], help="terms to add")
     vocab.add_argument("--remove", nargs="+", default=[], help="terms to remove")
@@ -440,6 +486,7 @@ def main(argv=None) -> int:
         "levels": cmd_levels,
         "language": cmd_language,
         "vocabulary": cmd_vocabulary,
+        "prompt": cmd_prompt,
         "ui": cmd_ui,
         "sources": cmd_sources,
         "record": cmd_record,

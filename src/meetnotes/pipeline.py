@@ -208,6 +208,13 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
     if not cfg.llm.keep_asr_loaded:
         asr.unload_all()
 
+    spoken = [s for s in segments if outputs.clean_text(s.get("text", ""))]
+    if not spoken and not meta.get("notes"):
+        raise llm.LlmError(
+            "nothing to summarize: this meeting has no transcript segments. "
+            "Check that the audio contains speech, then run process --force."
+        )
+
     source = outputs.transcript_for_llm(meta, segments)
     meta.update(store.read_meta(path))
 
