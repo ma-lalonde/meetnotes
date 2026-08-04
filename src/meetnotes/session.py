@@ -67,6 +67,10 @@ class Session:
         if theirs == mine:
             theirs = f"{theirs} (other)"
 
+        # An untitled meeting is named after who was in it, which is more
+        # useful in a folder listing than "meeting".
+        title = title.strip() or f"{mine}_X_{theirs}"
+
         root = self.cfg.root
         root.mkdir(parents=True, exist_ok=True)
         self.path = store.new_meeting(root, title)

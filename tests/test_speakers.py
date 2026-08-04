@@ -40,7 +40,9 @@ def test_safe_label_falls_back_when_empty():
     assert store.safe_label("///", "Me") == "Me"
 
 
-def test_identical_names_are_disambiguated(tmp_path, monkeypatch):
+@pytest.fixture
+def recording(tmp_path, monkeypatch):
+    """Start a recording far enough to inspect naming, then fail out."""
     cfg = Config()
     cfg.data_dir = str(tmp_path)
     cfg.capture.mic_source = "1"
@@ -67,11 +69,63 @@ def test_identical_names_are_disambiguated(tmp_path, monkeypatch):
     monkeypatch.setattr(audio, "Recorder", FakeRecorder)
     monkeypatch.setattr(session.time, "sleep", lambda *_: None)
 
-    sess = session.Session(cfg)
-    with pytest.raises(RuntimeError):
-        sess.start("sync", mic_label="Marc", system_label="Marc")
+    def run(title, mic_label="", system_label=""):
+        sess = session.Session(cfg)
+        with pytest.raises(RuntimeError):
+            sess.start(title, mic_label=mic_label, system_label=system_label)
+        meetings = store.list_meetings(cfg.root)
+        return started["tracks"], meetings[0] if meetings else {}
 
-    assert list(started["tracks"]) == ["Marc", "Marc (other)"]
+    return run
+
+
+def test_identical_names_are_disambiguated(recording):
+    tracks, _ = recording("sync", mic_label="Marc", system_label="Marc")
+    assert list(tracks) == ["Marc", "Marc (other)"]
+
+
+def test_empty_title_is_named_after_both_speakers(recording):
+    _, meta = recording("", mic_label="Marc", system_label="Chloe")
+    assert meta["title"] == "Marc_X_Chloe"
+    assert meta["id"].endswith("_marc-x-chloe")
+
+
+def test_whitespace_title_counts_as_empty(recording):
+    _, meta = recording("   ", mic_label="Marc", system_label="Chloe")
+    assert meta["title"] == "Marc_X_Chloe"
+
+
+def test_given_title_is_kept(recording):
+    _, meta = recording("Quarterly review", mic_label="Marc", system_label="Chloe")
+    assert meta["title"] == "Quarterly review"
+
+
+def test_default_title_uses_the_fallback_names(recording):
+    _, meta = recording("")
+    assert meta["title"] == "Me_X_Participants"
+
+
+def test_accented_names_survive_the_folder_slug(recording):
+    _, meta = recording("", mic_label="Marc-Antoine", system_label="Chloé")
+    assert meta["title"] == "Marc-Antoine_X_Chloé"
+    # Folded, not dropped: the accent must not truncate the name.
+    assert meta["id"].endswith("_marc-antoine-x-chloe")
+
+
+def test_slugify_folds_accents():
+    assert store.slugify("Chloé Gagnon") == "chloe-gagnon"
+    assert store.slugify("Réunion trimestrielle") == "reunion-trimestrielle"
+
+
+def test_slugify_folds_ligatures_nfkd_leaves_alone():
+    assert store.slugify("Ægir") == "aegir"
+    assert store.slugify("Straße") == "strasse"
+    assert store.slugify("Œuvre") == "oeuvre"
+
+
+def test_slugify_falls_back_when_nothing_survives():
+    assert store.slugify("日本語") == "meeting"
+    assert store.slugify("!!!") == "meeting"
 
 
 def test_named_speakers_appear_as_transcript_headings():

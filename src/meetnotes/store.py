@@ -19,6 +19,7 @@ import json
 import os
 import re
 import threading
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -37,8 +38,20 @@ def safe_label(name: str, fallback: str) -> str:
     return cleaned or fallback
 
 
+# Letters NFKD does not decompose, which would otherwise vanish from a slug.
+LIGATURES = {
+    "æ": "ae", "œ": "oe", "ß": "ss", "ø": "o", "å": "aa",
+    "đ": "d", "ð": "d", "ł": "l", "þ": "th", "ı": "i",
+}
+
+
 def slugify(title: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    # Decompose first, or an accented letter is dropped rather than folded:
+    # "Chloe" with an acute e would otherwise slug to "chlo".
+    lowered = "".join(LIGATURES.get(ch, ch) for ch in title.lower())
+    folded = unicodedata.normalize("NFKD", lowered)
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    slug = re.sub(r"[^a-z0-9]+", "-", folded).strip("-")
     return slug or "meeting"
 
 

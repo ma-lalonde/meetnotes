@@ -54,7 +54,7 @@ class RecordScreen(QWidget):
         self.level.connect(self._on_level)
 
         self.title = QLineEdit()
-        self.title.setPlaceholderText("Meeting title")
+        self.title.setPlaceholderText("Meeting title (defaults to both names)")
         self.mic = QComboBox()
         self.system = QComboBox()
         # Speaker names: yours is stable and gets saved, the other side changes
@@ -263,7 +263,7 @@ class RecordScreen(QWidget):
         self.notes.clear()
         try:
             self.session.start(
-                self.title.text().strip() or "meeting",
+                self.title.text().strip(),
                 mic_label=self.mic_name.text().strip(),
                 system_label=self.system_name.text().strip(),
             )
@@ -981,7 +981,7 @@ class MainWindow(QWidget):
             return
         try:
             self.session.start(
-                "meeting",
+                "",
                 mic_label=self.cfg.capture.mic_label,
                 system_label=self.cfg.capture.system_label,
             )
