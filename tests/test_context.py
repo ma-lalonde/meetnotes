@@ -25,8 +25,11 @@ def test_required_context_rounds_up_to_a_step():
     assert llm.required_context(100) in llm.CONTEXT_STEPS
 
 
-def test_a_short_transcript_needs_the_smallest_step():
-    assert llm.required_context(1000) == 4096
+def test_a_short_transcript_still_gets_room_to_answer():
+    # Sizing the window to the transcript alone loaded a five-minute recording
+    # at 4096, which the model ran out of before finishing the summary.
+    assert llm.required_context(1000) == llm.MIN_CONTEXT
+    assert llm.required_context(0) >= 8192
 
 
 def test_a_long_transcript_needs_more():
@@ -135,13 +138,22 @@ def test_a_context_that_cannot_hold_the_transcript_is_refused(loads):
     assert attempts[-1] == 4096
 
 
-def test_a_short_transcript_is_fine_at_a_small_size(loads):
+def test_a_short_transcript_is_not_squeezed_into_the_smallest_step(loads):
+    attempts = loads(131072)
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, _ = llm.fit_context(cfg, 2000)
+    assert ok
+    assert attempts == [llm.MIN_CONTEXT]
+
+
+def test_a_card_that_only_takes_4096_is_refused_rather_than_used(loads):
     attempts = loads(4096)
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    ok, detail = llm.fit_context(cfg, 2000)
-    assert ok
-    assert attempts == [4096]
+    with pytest.raises(llm.ContextTooSmall):
+        llm.fit_context(cfg, 2000)
+    assert attempts[-1] == 4096
 
 
 def test_the_lms_binary_is_found_where_lm_studio_installs_it(tmp_path, monkeypatch):
@@ -251,41 +263,46 @@ def test_a_failed_load_is_a_partial_result_not_a_lost_transcript(loads):
     assert issubclass(llm.LoadFailed, llm.LlmError)
 
 
-def test_an_adequate_resident_model_is_used_as_is(server):
-    # `lms load` adds an instance rather than replacing one, so loading a model
-    # that is already loaded puts a second copy of the weights on the card.
-    attempts, unloaded = server(131072, [loaded("qwen3-8b", 32768)])
-    cfg = Config()
-    cfg.llm.model = "qwen3-8b"
-    ok, detail = llm.fit_context(cfg, 60000)
-    assert ok
-    assert attempts == []
-    assert unloaded == []
-    assert "already loaded" in detail
-
-
-def test_a_resident_model_with_too_little_context_is_replaced_not_stacked(server):
+def test_everything_is_unloaded_before_the_load(server):
+    # `lms load` adds an instance rather than replacing one, so anything left
+    # resident is a second copy of weights competing for the same card. The
+    # unload is unconditional: deciding it from reported state meant that a
+    # missing or stale state silently skipped it.
     attempts, unloaded = server(131072, [loaded("qwen3-8b", 4096)])
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
     ok, _ = llm.fit_context(cfg, 60000)
     assert ok
-    assert unloaded == ["qwen3-8b"]
+    assert unloaded == [""]          # "" is unload --all
     assert attempts == [llm.required_context(60000)]
 
 
-def test_a_resident_model_of_unreported_size_is_replaced(server):
-    # loaded_context_length is absent from the published example response, so
-    # a loaded model with no size is treated as unknown, never as adequate.
-    attempts, unloaded = server(131072, [loaded("qwen3-8b", 0)])
+def test_a_model_already_loaded_at_the_right_size_is_still_reloaded(server):
+    # Costs one reload. Buys never stacking on a card that reports nothing.
+    attempts, unloaded = server(131072, [loaded("qwen3-8b", 32768)])
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    llm.fit_context(cfg, 60000)
-    assert unloaded == ["qwen3-8b"]
+    ok, _ = llm.fit_context(cfg, 60000)
+    assert ok
+    assert unloaded == [""]
     assert attempts == [llm.required_context(60000)]
 
 
-def test_a_different_resident_model_is_evicted_to_make_room(server):
+def test_a_server_reporting_no_state_at_all_still_unloads(server):
+    # The failure that kept recurring: no state field, so nothing looked
+    # loaded, so nothing was evicted and the load stacked.
+    attempts, unloaded = server(131072, [
+        {"id": "qwen3-8b", "context": 131072},
+    ])
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, _ = llm.fit_context(cfg, 60000)
+    assert ok
+    assert unloaded == [""]
+    assert attempts == [llm.required_context(60000)]
+
+
+def test_a_different_resident_model_is_evicted_too(server):
     attempts, unloaded = server(131072, [
         loaded("some-other-13b", 32768),
         {"id": "qwen3-8b", "context": 131072, "state": "not-loaded", "loaded_context": 0},
@@ -294,22 +311,8 @@ def test_a_different_resident_model_is_evicted_to_make_room(server):
     cfg.llm.model = "qwen3-8b"
     ok, _ = llm.fit_context(cfg, 60000)
     assert ok
-    assert unloaded == ["some-other-13b"]
+    assert unloaded == [""]
     assert attempts == [llm.required_context(60000)]
-
-
-def test_an_adequate_resident_model_is_kept_even_with_others_loaded(server):
-    # Nothing is evicted when no load is needed: the summary can go straight
-    # to the instance that is already up.
-    attempts, unloaded = server(131072, [
-        loaded("some-other-13b", 8192),
-        loaded("qwen3-8b", 65536),
-    ])
-    cfg = Config()
-    cfg.llm.model = "qwen3-8b"
-    ok, _ = llm.fit_context(cfg, 60000)
-    assert ok
-    assert (attempts, unloaded) == ([], [])
 
 
 def test_the_model_maximum_is_respected(loads):

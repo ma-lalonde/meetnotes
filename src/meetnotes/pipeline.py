@@ -17,6 +17,7 @@ import inspect
 import json
 import re
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -205,6 +206,36 @@ def process(path: Path, cfg, force: bool = False, with_llm: bool = True, progres
         return report
 
 
+@contextmanager
+def _model_log(path: Path, cfg, source: str):
+    """Record how the context size was decided, into the meeting folder.
+
+    Every step here is a subprocess or an HTTP call whose result is otherwise
+    invisible once the run is over, which makes a load that did not do what it
+    was told impossible to tell apart from one that did.
+    """
+    lines = [
+        f"model            {cfg.llm.model}",
+        f"base url         {cfg.llm.base_url}",
+        f"lms binary       {llm.lms_binary() or 'NOT FOUND'}",
+        f"transcript       {len(source)} characters",
+        f"prompt           {len(cfg.llm.summary_prompt)} characters",
+        f"context wanted   {llm.required_context(len(source) + len(cfg.llm.summary_prompt))}",
+        f"max_context cap  {cfg.llm.max_context or 'none'}",
+        f"gpu             {llm.vram_note().strip() or 'no NVIDIA GPU reported'}",
+    ]
+    for proc in hardware.gpu_processes():
+        lines.append(f"  holding        {proc['used_mb']} MB  {proc['name']} (pid {proc['pid']})")
+    try:
+        yield lines.append
+    finally:
+        for entry in llm.loaded():
+            lines.append(f"lms ps           {entry}")
+        target = path / RAW / "model_load.log"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        store.write_atomic(target, "\n".join(lines) + "\n")
+
+
 def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progress) -> dict:
     report: dict[str, str] = {}
     store.update_meta(path, state="summarizing")
@@ -232,7 +263,9 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
         # A load that fails here raises: attempting the summary anyway only
         # trades a precise reason for an opaque out-of-memory from the server.
         needed = len(source) + len(cfg.llm.summary_prompt)
-        ok, detail = llm.fit_context(cfg, needed)
+        with _model_log(path, cfg, source) as note:
+            ok, detail = llm.fit_context(cfg, needed, log=note)
+            note(f"result: ok={ok} {detail}")
         if progress:
             progress(detail)
         if not ok:

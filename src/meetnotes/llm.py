@@ -175,7 +175,17 @@ def unload_all() -> tuple[bool, str]:
 CONTEXT_STEPS = (4096, 8192, 16384, 32768, 65536, 131072)
 
 
-def required_context(prompt_chars: int, reserve: int = 2000) -> int:
+# Room for the answer, on top of the prompt. A reasoning model spends most of
+# this thinking before it emits a word, and running out mid-answer is what a
+# truncated or empty summary actually is.
+ANSWER_RESERVE = 4096
+
+# Never load below this, however short the transcript. Sizing the window to a
+# five-minute recording produced a 4096-token load with no room to work in.
+MIN_CONTEXT = 8192
+
+
+def required_context(prompt_chars: int, reserve: int = ANSWER_RESERVE) -> int:
     """Context needed for a prompt of this size, rounded to a sane step.
 
     Roughly four characters per token for English and French, plus room for the
@@ -183,7 +193,7 @@ def required_context(prompt_chars: int, reserve: int = 2000) -> int:
     """
     estimate = int(prompt_chars / 4 * 1.2) + reserve
     for step in CONTEXT_STEPS:
-        if step >= estimate:
+        if step >= max(estimate, MIN_CONTEXT):
             return step
     return CONTEXT_STEPS[-1]
 
@@ -236,12 +246,13 @@ def _check_room(cfg, achieved: int, needed: int) -> None:
 
 
 def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
-    """Make sure the model is up with enough context for this transcript.
+    """Unload everything, then load the model with the context this needs.
 
-    `lms load` adds an instance rather than replacing one, and LM Studio holds
-    several models at once, so loading a model that is already loaded puts a
-    second copy of the same weights on the card. Hence: reuse the resident
-    instance when it already has the room, and evict it when it does not.
+    Unconditional, and deliberately so. Deciding whether the resident instance
+    could be reused meant trusting the state the server reports, and when that
+    is missing or stale nothing gets unloaded and `lms load` stacks a second
+    copy of the same weights on the card. Always evicting first cannot fail
+    that way, and costs one reload.
 
     Whether a given size fits in VRAM is measured rather than predicted, since
     the architecture details needed to compute a KV cache size are not exposed
@@ -260,16 +271,10 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
 
     needed = required_context(prompt_chars)
     ceiling = 0
-    resident = 0
-    is_loaded = False
-    others = []
     for entry in catalog(cfg):
         if entry.get("id") == cfg.llm.model:
             ceiling = int(entry.get("context") or 0)
-            is_loaded = entry.get("state") == "loaded"
-            resident = int(entry.get("loaded_context") or 0)
-        elif entry.get("state") == "loaded":
-            others.append(entry.get("id") or "")
+            break
 
     wanted = needed
     if ceiling:
@@ -277,22 +282,9 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
     if cfg.llm.max_context:
         wanted = min(wanted, cfg.llm.max_context)
 
-    if is_loaded and resident >= wanted:
-        # Already up with the room it needs. Loading it again would only add a
-        # second copy of the same weights.
-        _check_room(cfg, resident, needed)
-        return True, f"{cfg.llm.model} already loaded with {resident} tokens of context"
-
-    # Everything resident is VRAM this load is about to need: the copy being
-    # replaced most of all, since loading over it stacks rather than swaps.
-    for name in [n for n in others if n]:
-        freed, detail = unload(name)
-        if log and freed:
-            log(f"unloaded {name} to make room")
-    if is_loaded:
-        unload(cfg.llm.model)
-        if log:
-            log(f"unloaded {cfg.llm.model} at {resident or 'an unreported'} tokens")
+    freed, detail = unload()
+    if log:
+        log(f"unloaded every model: {detail}" if freed else f"unload failed: {detail}")
 
     sizes = [size for size in CONTEXT_STEPS if size <= wanted] or [CONTEXT_STEPS[0]]
     last = ""
