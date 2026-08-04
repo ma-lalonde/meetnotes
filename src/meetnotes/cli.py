@@ -1,3 +1,18 @@
+# meetnotes - local meeting recorder with live transcription and notes
+# Copyright (C) 2026 Marc-Antoine Lalonde
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+# PARTICULAR PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program. If not, see <https://www.gnu.org/licenses/>.
+
 import argparse
 import sys
 import time
@@ -203,6 +218,26 @@ def cmd_levels(cfg, args) -> int:
     return 0
 
 
+NOTICE = """meetnotes {version}
+Copyright (C) 2026 Marc-Antoine Lalonde
+
+This program comes with ABSOLUTELY NO WARRANTY.
+This is free software, and you are welcome to redistribute it under the terms
+of the GNU General Public License version 3 or later. See the LICENSE file, or
+<https://www.gnu.org/licenses/gpl-3.0.html>."""
+
+
+def cmd_version(cfg, args) -> int:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        release = version("meetnotes")
+    except PackageNotFoundError:
+        release = "development"
+    print(NOTICE.format(version=release))
+    return 0
+
+
 def cmd_ui(cfg, args) -> int:
     from .app import run
 
@@ -310,6 +345,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="meetnotes", description=__doc__)
     subs = parser.add_subparsers(dest="command")
 
+    subs.add_parser("version", help="show the version and licence notice")
     subs.add_parser("doctor", help="report hardware, models, and missing tools")
     subs.add_parser("list", help="list meetings")
     subs.add_parser("recover", help="reset meetings interrupted by a crash")
@@ -358,6 +394,7 @@ def main(argv=None) -> int:
         return run(cfg)
 
     handlers = {
+        "version": cmd_version,
         "doctor": cmd_doctor,
         "gpu": cmd_gpu,
         "probe": cmd_probe,
