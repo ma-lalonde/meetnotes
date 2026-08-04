@@ -374,8 +374,24 @@ def cmd_llm_check(cfg, args) -> int:
             )
     gpus = hardware.nvidia()
     if gpus:
-        print(f"gpu        {gpus[0].get('free_mb', 0)} MB free of {gpus[0]['vram_mb']} MB")
+        free = gpus[0].get("free_mb", 0)
+        print(f"gpu        {free} MB free of {gpus[0]['vram_mb']} MB")
+        procs = hardware.gpu_processes()
+        if procs:
+            print("holding    " + f"{procs[0]['used_mb']} MB  {procs[0]['name']} (pid {procs[0]['pid']})")
+            for proc in procs[1:]:
+                print(f"           {proc['used_mb']} MB  {proc['name']} (pid {proc['pid']})")
+        if free < 2000:
+            print(
+                "\n  NOT ENOUGH FREE VRAM to load a language model. Whatever is listed\n"
+                "  above is holding the card. LM Studio keeps several models resident\n"
+                "  at once: `lms ps` lists them, `lms unload --all` evicts them."
+            )
     print(f"lms CLI    {'yes' if shutil.which('lms') else 'no (auto context unavailable)'}")
+    if shutil.which("lms"):
+        resident = llm.loaded()
+        for line in resident[:12]:
+            print(f"  lms ps   {line}")
 
     payload = {
         "model": cfg.llm.model,

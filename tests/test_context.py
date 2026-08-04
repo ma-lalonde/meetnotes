@@ -84,14 +84,53 @@ def test_fit_context_steps_down_when_vram_will_not_take_it(loads):
     assert "8192" in detail
 
 
-def test_fit_context_reports_failure_when_nothing_loads(loads):
+def test_fit_context_raises_when_nothing_loads(loads):
+    # Proceeding to the summary anyway only replaces this reason with an
+    # opaque out-of-memory from the server.
     attempts = loads(0)
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    ok, detail = llm.fit_context(cfg, 60000)
-    assert not ok
-    assert "could not load" in detail
+    with pytest.raises(llm.LoadFailed) as caught:
+        llm.fit_context(cfg, 60000)
+    assert "could not load" in str(caught.value)
     assert attempts
+
+
+def test_a_failed_load_is_reported_with_the_gpu_state(loads, monkeypatch):
+    loads(0)
+    monkeypatch.setattr(
+        llm, "vram_note", lambda: " GPU: 400 MB free of 8188 MB."
+    )
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    with pytest.raises(llm.LoadFailed) as caught:
+        llm.fit_context(cfg, 60000)
+    assert "400 MB free" in str(caught.value)
+
+
+def test_a_failed_load_is_a_partial_result_not_a_lost_transcript(loads):
+    # LoadFailed is an LlmError, which the pipeline downgrades rather than
+    # letting it destroy already-written transcripts.
+    loads(0)
+    assert issubclass(llm.LoadFailed, llm.LlmError)
+
+
+def test_fit_context_evicts_the_resident_model_before_loading(loads, monkeypatch):
+    # LM Studio holds several models at once and `lms load` adds an instance,
+    # so without this the reload competes with the copy it replaces.
+    order = []
+    loads(131072)
+    monkeypatch.setattr(llm, "unload_all", lambda: (order.append("unload"), (True, "ok"))[1])
+    real_load = llm.load_model
+    monkeypatch.setattr(
+        llm, "load_model",
+        lambda *a, **k: (order.append("load"), real_load(*a, **k))[1],
+    )
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    llm.fit_context(cfg, 60000)
+    assert order[0] == "unload"
+    assert "load" in order
 
 
 def test_the_model_maximum_is_respected(loads):

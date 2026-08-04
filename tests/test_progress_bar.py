@@ -204,3 +204,79 @@ def test_streaming_ignores_malformed_chunks(monkeypatch):
         lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
     )
     assert llm.chat(cfg, "system", "user", on_token=lambda n: None) == "ok"
+
+
+OOM = "Failed to load model: not enough VRAM to allocate the KV cache"
+
+
+def _refuses(status=400, body=None):
+    return lambda request: httpx.Response(
+        status, json=body if body is not None else {"error": {"message": OOM}}
+    )
+
+
+def test_a_streaming_failure_reports_what_the_server_said(monkeypatch):
+    # raise_for_status yields only "Client error '400 Bad Request'", which
+    # hides the one sentence that says what went wrong.
+    cfg = Config()
+    cfg.llm.model = "fake"
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(_refuses())}),
+    )
+    with pytest.raises(llm.LlmError) as caught:
+        llm.chat(cfg, "system", "user", on_token=lambda n: None)
+    assert "not enough VRAM" in str(caught.value)
+
+
+def test_a_plain_failure_reports_what_the_server_said(monkeypatch):
+    cfg = Config()
+    cfg.llm.model = "fake"
+    cfg.llm.ttl_seconds = 0
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(_refuses(500))}),
+    )
+    with pytest.raises(llm.LlmError) as caught:
+        llm.chat(cfg, "system", "user")
+    assert "not enough VRAM" in str(caught.value)
+
+
+def test_a_non_json_error_body_still_reaches_the_user(monkeypatch):
+    cfg = Config()
+    cfg.llm.model = "fake"
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(
+            lambda request: httpx.Response(503, text="upstream is out of memory")
+        )}),
+    )
+    with pytest.raises(llm.LlmError) as caught:
+        llm.chat(cfg, "system", "user", on_token=lambda n: None)
+    assert "out of memory" in str(caught.value)
+
+
+def test_a_ttl_rejection_is_still_retried_before_reporting(monkeypatch):
+    # A 400 caused by the ttl field must not be mistaken for a fatal error.
+    cfg = Config()
+    cfg.llm.model = "fake"
+    cfg.llm.ttl_seconds = 300
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append("ttl" in body)
+        if "ttl" in body:
+            return httpx.Response(400, json={"error": "unknown field ttl"})
+        return httpx.Response(200, content=_sse(["fine"]))
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
+    )
+    assert llm.chat(cfg, "system", "user", on_token=lambda n: None) == "fine"
+    assert seen == [True, False]

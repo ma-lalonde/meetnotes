@@ -207,6 +207,10 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
     store.update_meta(path, state="summarizing")
     if not cfg.llm.keep_asr_loaded:
         asr.unload_all()
+        if progress:
+            # Whisper and the language model are the two candidates for holding
+            # the card. Reporting free VRAM at the handover says which one.
+            progress(f"freed the speech model.{llm.vram_note()}")
 
     spoken = [s for s in segments if outputs.clean_text(s.get("text", ""))]
     if not spoken and not meta.get("notes"):
@@ -222,6 +226,8 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
         # A transcript that overruns the context window is silently truncated,
         # leaving the model no room to answer. Size the window to the input.
         # Does nothing without the lms CLI, including no network call.
+        # A load that fails here raises: attempting the summary anyway only
+        # trades a precise reason for an opaque out-of-memory from the server.
         needed = len(source) + len(cfg.llm.summary_prompt)
         ok, detail = llm.fit_context(cfg, needed)
         if ok and progress:

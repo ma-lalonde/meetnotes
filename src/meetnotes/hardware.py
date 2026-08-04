@@ -68,6 +68,38 @@ def nvidia() -> list[dict]:
     return gpus
 
 
+def gpu_processes() -> list[dict]:
+    """Who is holding VRAM right now, largest first.
+
+    Free memory alone does not say whether the speech model, the language
+    model, or something unrelated is squatting on the card, and that is the
+    only question worth asking when a load fails.
+    """
+    if not shutil.which("nvidia-smi"):
+        return []
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_memory,process_name",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return []
+    procs = []
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3 or not parts[1].isdigit():
+            continue
+        procs.append({"pid": parts[0], "used_mb": int(parts[1]), "name": parts[2]})
+    return sorted(procs, key=lambda p: p["used_mb"], reverse=True)
+
+
 CUDA_LIB_MODULES = ("nvidia.cublas.lib", "nvidia.cudnn.lib")
 _preloaded = False
 

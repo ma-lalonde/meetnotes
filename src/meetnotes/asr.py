@@ -99,8 +99,19 @@ def get_model(name: str, device: str, compute_type: str):
 
 
 def unload_all() -> None:
+    """Release the speech models and the VRAM they hold.
+
+    Dropping the reference is not enough on its own: CTranslate2 frees device
+    memory in the destructor, so anything keeping the object alive in a cycle
+    keeps the VRAM too. Collecting makes the release happen now rather than
+    whenever the collector next runs, which here is after the language model
+    has already tried to load.
+    """
+    import gc
+
     with _model_lock:
         _models.clear()
+    gc.collect()
 
 
 def _pack(segments, offset: float, language: str) -> list[dict]:

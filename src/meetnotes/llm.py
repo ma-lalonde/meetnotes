@@ -24,6 +24,36 @@ class LlmError(RuntimeError):
     pass
 
 
+class LoadFailed(LlmError):
+    """The model could not be loaded at any context size."""
+
+
+def _server_error(resp) -> str:
+    """The server's own message, which raise_for_status throws away.
+
+    LM Studio reports an out-of-memory condition in the response body; the
+    HTTP status alone says only "400 Bad Request".
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return (resp.text or "").strip()[:300]
+    error = body.get("error", body) if isinstance(body, dict) else body
+    if isinstance(error, dict):
+        error = error.get("message") or json.dumps(error)
+    return str(error).strip()[:300]
+
+
+def vram_note() -> str:
+    from . import hardware
+
+    gpus = hardware.nvidia()
+    if not gpus:
+        return ""
+    gpu = gpus[0]
+    return f" GPU: {gpu['free_mb']} MB free of {gpu['vram_mb']} MB."
+
+
 # Defaults for the servers people actually run. ttl is LM Studio's idle-unload
 # field; the others ignore or reject it, so it is left at zero for them.
 PRESETS = [
@@ -148,6 +178,14 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
         # the CLI. Without it, do not even query the server.
         return False, "the lms CLI is not on PATH, leaving the context as loaded"
 
+    # LM Studio holds several models at once, and `lms load` adds an instance
+    # rather than replacing one. The resident copy is about to be superseded by
+    # this reload, so evicting it first is the difference between reloading a
+    # model and trying to fit two copies of it in VRAM.
+    freed, note = unload_all()
+    if log and freed:
+        log(f"unloaded resident models: {note}")
+
     wanted = required_context(prompt_chars)
     ceiling = 0
     for entry in catalog(cfg):
@@ -160,15 +198,23 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
         wanted = min(wanted, cfg.llm.max_context)
 
     sizes = [size for size in CONTEXT_STEPS if size <= wanted] or [CONTEXT_STEPS[0]]
+    last = ""
     for size in reversed(sizes):
         if log:
             log(f"loading {cfg.llm.model} with {size} tokens of context")
         ok, detail = load_model(cfg.llm.model, size)
         if ok:
             return True, detail
+        last = (detail or "").splitlines()[0][:160] if detail else ""
         if log:
-            log(f"  {size} did not load: {detail.splitlines()[0][:120] if detail else ''}")
-    return False, f"could not load {cfg.llm.model} at any context size"
+            log(f"  {size} did not load: {last}")
+    # Every size failed, so the weights themselves do not fit, not the KV cache.
+    # Summarizing would now hit the same wall with a less useful message.
+    raise LoadFailed(
+        f"could not load {cfg.llm.model} at any context size "
+        f"({sizes[-1]} to {sizes[0]}).{vram_note()} Something else is holding "
+        f"the GPU: check `nvidia-smi` and `lms ps`. Last error: {last or 'none reported'}"
+    )
 
 
 def loaded() -> list[str]:
@@ -240,7 +286,7 @@ def _stream(cfg, url: str, payload: dict, on_token) -> str:
                 if resp.status_code in (400, 422) and "ttl" in payload:
                     payload.pop("ttl")
                     return _stream(cfg, url, payload, on_token)
-                resp.raise_for_status()
+                raise LlmError(f"{resp.status_code} from {url}: {_server_error(resp)}")
             for line in resp.iter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -303,7 +349,10 @@ def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: s
                 if resp.status_code in (400, 422) and "ttl" in payload:
                     payload.pop("ttl")
                     resp = client.post(url, json=payload, headers=_headers(cfg))
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    raise LlmError(
+                        f"{resp.status_code} from {url}: {_server_error(resp)}"
+                    )
                 content = resp.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
         raise LlmError(f"{cfg.llm.model} at {url}: {exc}") from exc
