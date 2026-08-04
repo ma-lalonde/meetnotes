@@ -57,6 +57,14 @@ class RecordScreen(QWidget):
         self.title.setPlaceholderText("Meeting title")
         self.mic = QComboBox()
         self.system = QComboBox()
+        # Speaker names: yours is stable and gets saved, the other side changes
+        # per meeting and does not.
+        self.mic_name = QLineEdit(cfg.capture.mic_label)
+        self.mic_name.setPlaceholderText("Your name")
+        self.mic_name.setMaximumWidth(180)
+        self.system_name = QLineEdit(cfg.capture.system_label)
+        self.system_name.setPlaceholderText("Who you are meeting")
+        self.system_name.setMaximumWidth(180)
         self.mic_level = self._make_meter()
         self.system_level = self._make_meter()
         self.button = QPushButton("Start recording")
@@ -69,14 +77,20 @@ class RecordScreen(QWidget):
         mic_row = QHBoxLayout()
         mic_row.addWidget(self.mic, 3)
         mic_row.addWidget(self.mic_level, 2)
+        mic_row.addWidget(self.mic_name, 0)
         system_row = QHBoxLayout()
         system_row.addWidget(self.system, 3)
         system_row.addWidget(self.system_level, 2)
+        system_row.addWidget(self.system_name, 0)
 
         top = QFormLayout()
         top.addRow("Title", self.title)
         top.addRow("Microphone", mic_row)
         top.addRow("System audio", system_row)
+        top.addRow("", self._hint(
+            "Names on the right label each speaker in the transcript and summary. "
+            "Yours is remembered; the other changes per meeting."
+        ))
 
         self.engine = QLabel("")
         theme.muted(self.engine)
@@ -95,7 +109,10 @@ class RecordScreen(QWidget):
         self.note_input = QLineEdit()
         self.note_input.setPlaceholderText("Note, then Enter")
         self.note_input.returnPressed.connect(self.add_note)
-        theme.comfortable(self.title, self.mic, self.system, self.note_input)
+        theme.comfortable(
+            self.title, self.mic, self.system, self.note_input,
+            self.mic_name, self.system_name,
+        )
 
         left = QVBoxLayout()
         left.addWidget(QLabel("Live transcript"))
@@ -183,8 +200,10 @@ class RecordScreen(QWidget):
         work = Path(tempfile.mkdtemp(prefix="meetnotes-levels-"))
 
         if self.session.recording and self.session.recorder is not None:
-            for kind, label in (("mic", self.cfg.capture.mic_label),
-                                ("system", self.cfg.capture.system_label)):
+            # Track keys are the speaker names chosen for this meeting, which
+            # may differ from the stored defaults.
+            names = list(self.session.recorder.paths)
+            for kind, label in zip(("mic", "system"), names):
                 path = self.session.recorder.paths.get(label)
                 if path is None:
                     continue
@@ -219,7 +238,18 @@ class RecordScreen(QWidget):
             self.cfg.capture.mic_source = self.mic.currentData()
         if self.system.currentData():
             self.cfg.capture.system_source = self.system.currentData()
+        # Your own name is stable, so it becomes the default. The other side is
+        # different every meeting and is deliberately not remembered.
+        mine = self.mic_name.text().strip()
+        if mine:
+            self.cfg.capture.mic_label = mine
         self.cfg.save()
+
+    def _hint(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        theme.muted(label)
+        return label
 
     def toggle(self):
         if self.session.recording:
@@ -232,7 +262,11 @@ class RecordScreen(QWidget):
         self.transcript.clear()
         self.notes.clear()
         try:
-            self.session.start(self.title.text().strip() or "meeting")
+            self.session.start(
+                self.title.text().strip() or "meeting",
+                mic_label=self.mic_name.text().strip(),
+                system_label=self.system_name.text().strip(),
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Cannot record", str(exc))
             return
@@ -931,7 +965,11 @@ class MainWindow(QWidget):
         if self.session.recording:
             return
         try:
-            self.session.start("meeting")
+            self.session.start(
+                "meeting",
+                mic_label=self.cfg.capture.mic_label,
+                system_label=self.cfg.capture.system_label,
+            )
         except Exception as exc:
             self.surface()
             QMessageBox.critical(self, "Cannot record", str(exc))

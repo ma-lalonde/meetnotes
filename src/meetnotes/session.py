@@ -51,23 +51,32 @@ class Session:
             self.live.sort(key=lambda s: s["start"])
         self.on_segment(segment)
 
-    def start(self, title: str) -> Path:
+    def start(self, title: str, mic_label: str = "", system_label: str = "") -> Path:
         if self.recording:
             raise RuntimeError("already recording")
         cap = self.cfg.capture
         if not cap.mic_source and not cap.system_source:
             raise RuntimeError("no audio sources selected")
 
+        # Speaker names double as track filenames and transcript headings. The
+        # participant changes per meeting, so it is passed in rather than read
+        # from the stored defaults.
+        mine = store.safe_label(mic_label or cap.mic_label, "Me")
+        theirs = store.safe_label(system_label or cap.system_label, "Participants")
+        if theirs == mine:
+            theirs = f"{theirs} (other)"
+
         root = self.cfg.root
         root.mkdir(parents=True, exist_ok=True)
         self.path = store.new_meeting(root, title)
+        store.update_meta(self.path, speakers={"mic": mine, "system": theirs})
         self.live = []
         self.notes = []
 
         self.recorder = audio.Recorder(
             cap.record_cmd,
             cap.sample_rate,
-            {cap.mic_label: cap.mic_source, cap.system_label: cap.system_source},
+            {mine: cap.mic_source, theirs: cap.system_source},
             self.path / "audio",
         )
         if self.cfg.llm.free_vram_before_recording:

@@ -30,6 +30,13 @@ _process_locks: dict[str, threading.Lock] = {}
 _registry_lock = threading.Lock()
 
 
+def safe_label(name: str, fallback: str) -> str:
+    """A speaker name that is also usable as a filename."""
+    cleaned = re.sub(r"[^\w \-.']", "", (name or "").strip(), flags=re.UNICODE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned or fallback
+
+
 def slugify(title: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return slug or "meeting"
