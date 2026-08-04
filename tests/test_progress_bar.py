@@ -129,6 +129,67 @@ def test_streaming_assembles_the_whole_response(monkeypatch):
     assert counts == [1, 2, 3]
 
 
+def test_empty_stream_falls_back_to_a_plain_request(monkeypatch):
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(bool(body.get("stream")))
+        if body.get("stream"):
+            return httpx.Response(200, content=b"data: [DONE]")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "recovered"}}]}
+        )
+
+    cfg = Config()
+    cfg.llm.model = "fake"
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
+    )
+    assert llm.chat(cfg, "s", "u", on_token=lambda n: None) == "recovered"
+    assert calls == [True, False]
+
+
+def test_empty_response_raises_rather_than_writing_nothing(monkeypatch):
+    cfg = Config()
+    cfg.llm.model = "fake"
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda **kw: real_client(
+            **{**kw, "transport": httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "   "}}]}
+                )
+            )},
+        ),
+    )
+    with pytest.raises(llm.LlmError, match="empty response"):
+        llm.chat(cfg, "s", "u")
+
+
+def test_streaming_reads_content_from_a_final_message_chunk(monkeypatch):
+    def handler(request):
+        body = (
+            b'data: {"choices": [{"delta": {"reasoning_content": "thinking"}}]}\n'
+            b'data: {"choices": [{"message": {"content": "answer"}}]}\n'
+            b"data: [DONE]"
+        )
+        return httpx.Response(200, content=body)
+
+    cfg = Config()
+    cfg.llm.model = "fake"
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(handler)}),
+    )
+    # The reasoning scratchpad must not leak into the summary.
+    assert llm.chat(cfg, "s", "u", on_token=lambda n: None) == "answer"
+
+
 def test_streaming_ignores_malformed_chunks(monkeypatch):
     cfg = Config()
     cfg.llm.model = "fake"

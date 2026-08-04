@@ -180,7 +180,11 @@ def _stream(cfg, url: str, payload: dict, on_token) -> str:
                 except json.JSONDecodeError:
                     continue
                 choices = chunk.get("choices") or [{}]
-                piece = (choices[0].get("delta") or {}).get("content") or ""
+                delta = choices[0].get("delta") or {}
+                # Some servers only populate message on the final chunk, and
+                # reasoning models put their scratchpad in a separate field
+                # that must not end up in the summary.
+                piece = delta.get("content") or (choices[0].get("message") or {}).get("content")
                 if piece:
                     pieces.append(piece)
                     on_token(len(pieces))
@@ -214,6 +218,13 @@ def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: s
     try:
         if on_token is not None:
             content = _stream(cfg, url, payload, on_token)
+            if not (content or "").strip():
+                # A stream that yielded nothing must not become an empty file.
+                # Fall back to a plain request before giving up.
+                with httpx.Client(timeout=cfg.llm.timeout) as client:
+                    resp = client.post(url, json=payload, headers=_headers(cfg))
+                    resp.raise_for_status()
+                    content = resp.json()["choices"][0]["message"]["content"]
         else:
             with httpx.Client(timeout=cfg.llm.timeout) as client:
                 resp = client.post(url, json=payload, headers=_headers(cfg))
@@ -226,6 +237,12 @@ def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: s
         raise LlmError(f"{cfg.llm.model} at {url}: {exc}") from exc
 
     content = (content or "").strip()
+    if not content:
+        raise LlmError(
+            f"{cfg.llm.model} returned an empty response. Reasoning models can spend "
+            "their whole budget before emitting any answer; try raising the context "
+            "length or picking a different model."
+        )
     if not schema:
         return content
     try:

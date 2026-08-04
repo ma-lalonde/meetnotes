@@ -244,6 +244,33 @@ def cmd_ui(cfg, args) -> int:
     return run(cfg, check=args.check, platform=args.platform)
 
 
+def cmd_vocabulary(cfg, args) -> int:
+    terms = list(cfg.asr.vocabulary)
+    if args.clear:
+        terms = []
+    for term in args.remove:
+        terms = [t for t in terms if t.casefold() != term.casefold()]
+    for term in args.add:
+        if term.strip() and term.casefold() not in {t.casefold() for t in terms}:
+            terms.append(term.strip())
+
+    if args.add or args.remove or args.clear:
+        cfg.asr.vocabulary = terms
+        cfg.save()
+
+    if terms:
+        for term in terms:
+            print(f"  {term}")
+    else:
+        print("no expected names set")
+    print(
+        "\nThese are given to the recogniser as hints, which is what stops proper\n"
+        "nouns coming back garbled. Add with:\n"
+        '  meetnotes vocabulary --add "Chloe Gagnon" Catena Portainer'
+    )
+    return 0
+
+
 def cmd_language(cfg, args) -> int:
     if args.spec:
         spec = args.spec.strip().lower()
@@ -368,6 +395,11 @@ def main(argv=None) -> int:
     ui.add_argument("--check", action="store_true", help="build every screen offscreen and exit")
     ui.add_argument("--platform", default="", help="override QT_QPA_PLATFORM, e.g. xcb or wayland")
 
+    vocab = subs.add_parser("vocabulary", help="names and jargon to expect in speech")
+    vocab.add_argument("--add", nargs="+", default=[], help="terms to add")
+    vocab.add_argument("--remove", nargs="+", default=[], help="terms to remove")
+    vocab.add_argument("--clear", action="store_true")
+
     lang = subs.add_parser("language", help="show or set expected languages")
     lang.add_argument(
         "spec", nargs="?",
@@ -407,6 +439,7 @@ def main(argv=None) -> int:
         "probe": cmd_probe,
         "levels": cmd_levels,
         "language": cmd_language,
+        "vocabulary": cmd_vocabulary,
         "ui": cmd_ui,
         "sources": cmd_sources,
         "record": cmd_record,

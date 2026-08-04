@@ -25,6 +25,25 @@ _models: dict[tuple, object] = {}
 _model_lock = threading.Lock()
 
 
+def vocabulary_args(cfg, extra: list[str] | None = None) -> dict:
+    """Lexical hints for the recogniser.
+
+    Whisper cannot be calibrated to a voice: there is no speaker enrolment and
+    no per-speaker conditioning. What it does accept is text hints, which is
+    what actually fixes garbled names.
+
+    hotwords applies to every window, initial_prompt only to the first, so both
+    are set. hotwords is ignored when prefix is given, which is never here.
+    """
+    terms = [term.strip() for term in (cfg.asr.vocabulary or []) if term.strip()]
+    terms += [term.strip() for term in (extra or []) if term.strip()]
+    seen = list(dict.fromkeys(terms))
+    if not seen:
+        return {}
+    joined = ", ".join(seen)
+    return {"hotwords": joined, "initial_prompt": f"Terms used in this recording: {joined}."}
+
+
 def language_args(cfg, detected: str | None = None) -> dict:
     """Whisper decodes one language per call, so code-switching needs help.
 
@@ -106,9 +125,10 @@ def _pack(segments, offset: float, language: str) -> list[dict]:
     return packed
 
 
-def transcribe_file(path: Path, cfg, plan: dict) -> list[dict]:
+def transcribe_file(path: Path, cfg, plan: dict, extra_terms: list[str] | None = None) -> list[dict]:
     model = get_model(plan["final_model"], plan["device"], plan["compute_type"])
     allowed = [code for code in cfg.asr.languages if code.strip()]
+    hints = vocabulary_args(cfg, extra_terms)
 
     if cfg.asr.language_mode != "restrict" or len(allowed) < 2:
         segments, _ = model.transcribe(
@@ -116,6 +136,7 @@ def transcribe_file(path: Path, cfg, plan: dict) -> list[dict]:
             beam_size=cfg.asr.final_beam_size,
             vad_filter=True,
             word_timestamps=cfg.asr.word_timestamps,
+            **hints,
             **language_args(cfg),
         )
         return _pack(segments, 0.0, language_args(cfg).get("language") or "")
@@ -139,6 +160,7 @@ def transcribe_file(path: Path, cfg, plan: dict) -> list[dict]:
             vad_filter=True,
             word_timestamps=cfg.asr.word_timestamps,
             language=language or None,
+            **hints,
         )
         out.extend(_pack(segments, start / rate, language))
     out.sort(key=lambda s: s["start"])

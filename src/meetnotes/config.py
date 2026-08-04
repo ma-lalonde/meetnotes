@@ -57,6 +57,9 @@ class Asr:
     final_beam_size: int = 5
     # Needed to split a sentence at the exact word a note was typed against.
     word_timestamps: bool = True
+    # Names and jargon the recogniser should expect. Whisper has no speaker
+    # enrolment, but it does accept lexical hints.
+    vocabulary: list[str] = field(default_factory=list)
 
 
 @dataclass

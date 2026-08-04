@@ -30,7 +30,8 @@ def _audio_fingerprint(path: Path, meta: dict, plan: dict, cfg) -> str:
         stat = target.stat() if target.exists() else None
         stats.append([label, filename, stat.st_size if stat else 0])
     return artifacts.sha(
-        stats, plan["final_model"], cfg.asr.language, cfg.asr.final_beam_size
+        stats, plan["final_model"], cfg.asr.language, cfg.asr.final_beam_size,
+        sorted(cfg.asr.vocabulary),
     )
 
 

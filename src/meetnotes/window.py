@@ -703,6 +703,9 @@ class ModelsScreen(QWidget):
         self.live_note = self._note()
         self.final_note = self._note()
         self.summary_note = self._note()
+        self.vocabulary = QPlainTextEdit("\n".join(cfg.asr.vocabulary))
+        self.vocabulary.setPlaceholderText("Chloé Gagnon\nCatena\nPortainer")
+        self.vocabulary.setMaximumHeight(110)
         theme.comfortable(self.live, self.final, self.precision, self.summary)
 
         speech = QWidget()
@@ -712,6 +715,13 @@ class ModelsScreen(QWidget):
         speech_form.addRow("Final pass", self.final)
         speech_form.addRow("", self.final_note)
         speech_form.addRow("Precision", self.precision)
+        speech_form.addRow("Expected names", self.vocabulary)
+        speech_form.addRow("", self._note(
+            "One per line: people, companies, bands, products, jargon. These are "
+            "given to the recogniser as hints, which is what stops proper nouns "
+            "coming back garbled. Whisper cannot be calibrated to a voice; this "
+            "is the lever it does have."
+        ))
         speech_form.addRow("", self._note(
             "int8 roughly halves the memory of float16 with little quality cost."
         ))
@@ -883,6 +893,9 @@ class ModelsScreen(QWidget):
         cfg.asr.final_pass = bool(final)
         cfg.asr.final_model = final or ""
         cfg.asr.compute_type = self.precision.currentData() or "auto"
+        cfg.asr.vocabulary = [
+            line.strip() for line in self.vocabulary.toPlainText().splitlines() if line.strip()
+        ]
         cfg.llm.base_url = self.base_url.text().strip()
         cfg.llm.api_key = self.api_key.text().strip()
         cfg.llm.model = self.summary.currentData() or self.summary.currentText().strip()
