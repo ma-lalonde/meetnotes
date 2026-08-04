@@ -159,7 +159,8 @@ prompted it and what followed rather than after the whole utterance. The final
 pass records word timestamps, so the cut falls after the last word that had
 finished being spoken - a word still in progress belongs after the note, since
 the note cannot be reacting to a word not yet heard. The remainder is marked
-`...continued`.
+`[...continued]`, bracketed so it reads as an editorial marker rather than as
+something that was said.
 
 **Re-running is safe.** Each artifact records a fingerprint of its inputs and a
 hash of what was written. Unchanged inputs are skipped, changed inputs

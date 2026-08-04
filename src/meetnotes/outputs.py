@@ -203,7 +203,8 @@ def render_transcript_with_notes(meta: dict, segments: list[dict]) -> str:
             lines.append(f"**{item['speaker']}**")
             lines.append("")
             last_speaker = item["speaker"]
-        marker = "...continued " if item.get("continued") else ""
+        # Bracketed so it reads as an editorial marker, not as something said.
+        marker = "[...continued] " if item.get("continued") else ""
         lines.append(f"[{clock(item['start'])}] {marker}{text}")
     return "\n".join(lines).strip() + "\n"
 

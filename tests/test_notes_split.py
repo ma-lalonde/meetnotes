@@ -121,7 +121,7 @@ def test_rendered_output_marks_the_continuation():
     meta = {**META, "notes": [{"at": 13.5, "text": "confirm the date"}]}
     text = outputs.render_transcript_with_notes(meta, [SENTENCE])
     assert "> **NOTE** [00:00:13] confirm the date" in text
-    assert "...continued the SLA Tuesday" in text
+    assert "[...continued] the SLA Tuesday" in text
     assert text.index("we should ship") < text.index("confirm the date")
     assert text.index("confirm the date") < text.index("the SLA Tuesday")
 
