@@ -111,6 +111,8 @@ class Config:
             sub = spec.default_factory() if spec.default_factory is not MISSING else None
             if is_dataclass(sub):
                 if isinstance(value, dict):
+                    if spec.name == "llm":
+                        value = prompts.migrate(value)
                     known = {f.name for f in fields(sub)}
                     kwargs[spec.name] = type(sub)(**{k: v for k, v in value.items() if k in known})
             else:
