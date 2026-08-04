@@ -13,6 +13,8 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
+import subprocess
+
 import pytest
 
 from meetnotes import llm
@@ -55,26 +57,37 @@ def server(monkeypatch):
     """
     def make(ceiling, entries=None):
         attempts, unloaded = [], []
+        state = list(entries) if entries is not None else None
+
+        def catalog(cfg):
+            if state is None:
+                return [{"id": cfg.llm.model, "context": 131072,
+                         "state": "", "loaded_context": 0}]
+            return state
 
         def fake_load(model, context, gpu="max"):
             attempts.append(context)
             if context > ceiling:
                 return False, "failed to allocate KV cache"
+            # A real server reports the new size on the next query, which is
+            # what fit_context reads back to confirm the load was honoured.
+            if state is not None:
+                for entry in state:
+                    if entry["id"] == model:
+                        entry.update(state="loaded", loaded_context=context)
             return True, f"loaded {model} with {context}"
 
         def fake_unload(model=""):
             unloaded.append(model)
+            for entry in state or []:
+                if not model or entry["id"] == model:
+                    entry.update(state="not-loaded", loaded_context=0)
             return True, "ok"
 
-        monkeypatch.setattr(llm.shutil, "which", lambda name: "/usr/bin/lms")
+        monkeypatch.setattr(llm, "lms_binary", lambda: "/home/x/.lmstudio/bin/lms")
         monkeypatch.setattr(llm, "load_model", fake_load)
         monkeypatch.setattr(llm, "unload", fake_unload)
-        monkeypatch.setattr(
-            llm, "catalog",
-            lambda cfg: entries if entries is not None else [
-                {"id": cfg.llm.model, "context": 131072, "state": "", "loaded_context": 0}
-            ],
-        )
+        monkeypatch.setattr(llm, "catalog", catalog)
         return attempts, unloaded
 
     return make
@@ -129,6 +142,82 @@ def test_a_short_transcript_is_fine_at_a_small_size(loads):
     ok, detail = llm.fit_context(cfg, 2000)
     assert ok
     assert attempts == [4096]
+
+
+def test_the_lms_binary_is_found_where_lm_studio_installs_it(tmp_path, monkeypatch):
+    # lms only reaches PATH when `lms bootstrap` edits a shell profile, which an
+    # application launched from a desktop entry never reads. Looking only on
+    # PATH is why loads and unloads silently did nothing.
+    monkeypatch.setattr(llm.shutil, "which", lambda name: None)
+    installed = tmp_path / ".lmstudio" / "bin" / "lms"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("#!/bin/sh\n")
+    installed.chmod(0o755)
+    monkeypatch.setattr(llm, "LMS_PATHS", (str(tmp_path / ".lmstudio/bin/lms"),))
+    assert llm.lms_binary() == str(installed)
+
+
+def test_path_wins_when_the_cli_is_on_it(monkeypatch):
+    monkeypatch.setattr(llm.shutil, "which", lambda name: "/usr/local/bin/lms")
+    assert llm.lms_binary() == "/usr/local/bin/lms"
+
+
+def test_a_non_executable_candidate_is_not_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(llm.shutil, "which", lambda name: None)
+    dud = tmp_path / "lms"
+    dud.write_text("")
+    dud.chmod(0o644)
+    monkeypatch.setattr(llm, "LMS_PATHS", (str(dud),))
+    assert llm.lms_binary() == ""
+
+
+def test_load_passes_only_flags_lms_accepts(monkeypatch):
+    # lms load takes [path], --ttl, --gpu, --context-length, --identifier,
+    # --estimate-only and --host. A stray --yes fails the whole command.
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+
+    monkeypatch.setattr(llm, "lms_binary", lambda: "/home/x/.lmstudio/bin/lms")
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    ok, _ = llm.load_model("qwen3-8b", 32768)
+    assert ok
+    allowed = {"--ttl", "--gpu", "--context-length", "--identifier",
+               "--estimate-only", "--host"}
+    flags = {a.split("=")[0] for a in seen["args"] if a.startswith("--")}
+    assert flags <= allowed
+    assert "--context-length=32768" in seen["args"]
+
+
+def test_without_the_cli_the_reason_names_the_fix(monkeypatch):
+    monkeypatch.setattr(llm, "lms_binary", lambda: "")
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, detail = llm.fit_context(cfg, 60000)
+    assert not ok
+    # The symptom is the server loading at its own default, so the message has
+    # to point at the cause rather than at the context size.
+    assert "bootstrap" in detail
+
+
+def test_a_load_that_is_silently_clamped_is_caught(server, monkeypatch):
+    # A zero exit says the command was accepted, not that the size was honoured.
+    entry = loaded("qwen3-8b", 0)
+    entry["state"] = "not-loaded"
+    attempts, _ = server(131072, [entry])
+    monkeypatch.setattr(
+        llm, "load_model",
+        lambda model, context, gpu="max": (
+            entry.update(state="loaded", loaded_context=4096), (True, "ok")
+        )[1],
+    )
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    with pytest.raises(llm.ContextTooSmall) as caught:
+        llm.fit_context(cfg, 60000)
+    assert "4096" in str(caught.value)
 
 
 def test_fit_context_raises_when_nothing_loads(loads):
@@ -258,14 +347,16 @@ def test_a_ceiling_above_what_is_needed_does_not_inflate_the_load(loads):
 
 
 def test_load_model_without_the_cli_is_reported_not_raised(monkeypatch):
-    monkeypatch.setattr(llm.shutil, "which", lambda name: None)
+    # Patch the lookup, not shutil.which: the CLI is also found off PATH, so
+    # stubbing which alone still finds a real install on a developer machine.
+    monkeypatch.setattr(llm, "lms_binary", lambda: "")
     ok, detail = llm.load_model("qwen3-8b", 8192)
     assert not ok
     assert "lms CLI" in detail
 
 
 def test_fit_context_without_the_cli_makes_no_network_call(monkeypatch):
-    monkeypatch.setattr(llm.shutil, "which", lambda name: None)
+    monkeypatch.setattr(llm, "lms_binary", lambda: "")
     monkeypatch.setattr(llm, "catalog", lambda cfg: pytest.fail("should not query"))
     cfg = Config()
     cfg.llm.model = "qwen3-8b"

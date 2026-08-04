@@ -14,8 +14,10 @@
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
 import json
+import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import httpx
 
@@ -118,14 +120,40 @@ def _headers(cfg) -> dict:
     return {"Authorization": f"Bearer {cfg.llm.api_key or 'none'}"}
 
 
+# lms ships inside LM Studio and only reaches PATH when `lms bootstrap` edits a
+# shell profile. An application launched from a desktop entry or a tray icon
+# never reads those, so PATH alone finds nothing and every load and unload turns
+# into a silent no-op. These are the documented install locations.
+LMS_PATHS = (
+    "~/.lmstudio/bin/lms",
+    "~/.cache/lm-studio/bin/lms",
+    "/opt/LM Studio/resources/app/.webpack/lms",
+    "~/Library/Application Support/LM Studio/bin/lms",
+    "~/AppData/Local/LM-Studio/lms.exe",
+)
+
+
+def lms_binary() -> str:
+    """The lms CLI, found on PATH or where LM Studio installs it."""
+    found = shutil.which("lms")
+    if found:
+        return found
+    for candidate in LMS_PATHS:
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return ""
+
+
 def unload(model: str = "") -> tuple[bool, str]:
     """Evict one model, or every loaded model when no name is given.
 
     LM Studio's REST API has no unload endpoint, but the lms CLI does.
     """
-    if not shutil.which("lms"):
-        return False, "the lms CLI is not on PATH"
-    args = ["lms", "unload", model] if model else ["lms", "unload", "--all"]
+    lms = lms_binary()
+    if not lms:
+        return False, "the lms CLI was not found"
+    args = [lms, "unload", model] if model else [lms, "unload", "--all"]
     try:
         done = subprocess.run(args, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -166,11 +194,15 @@ def load_model(model: str, context: int, gpu: str = "max") -> tuple[bool, str]:
     The OpenAI-compatible API has no context parameter: the size is fixed when
     the model is loaded, so changing it means reloading.
     """
-    if not shutil.which("lms"):
-        return False, "the lms CLI is not on PATH"
+    lms = lms_binary()
+    if not lms:
+        return False, "the lms CLI was not found"
     try:
         done = subprocess.run(
-            ["lms", "load", model, f"--context-length={context}", f"--gpu={gpu}", "--yes"],
+            # No confirmation flag: lms load takes [path], --ttl, --gpu,
+            # --context-length, --identifier, --estimate-only and --host, and
+            # rejects anything else.
+            [lms, "load", model, f"--context-length={context}", f"--gpu={gpu}"],
             capture_output=True, text=True, timeout=600,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -178,6 +210,17 @@ def load_model(model: str, context: int, gpu: str = "max") -> tuple[bool, str]:
     if done.returncode != 0:
         return False, (done.stderr or done.stdout).strip()[:300]
     return True, f"loaded {model} with {context} tokens of context"
+
+
+def _resident_context(cfg) -> int:
+    """What the server says the model is loaded with, zero if it does not say."""
+    try:
+        for entry in catalog(cfg):
+            if entry.get("id") == cfg.llm.model and entry.get("state") == "loaded":
+                return int(entry.get("loaded_context") or 0)
+    except LlmError:
+        pass
+    return 0
 
 
 def _check_room(cfg, achieved: int, needed: int) -> None:
@@ -204,10 +247,16 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
     the architecture details needed to compute a KV cache size are not exposed
     by the API. A failed load is the signal, and the next smaller size is tried.
     """
-    if not shutil.which("lms"):
-        # Reloading is the only way to change the context size, and that needs
-        # the CLI. Without it, do not even query the server.
-        return False, "the lms CLI is not on PATH, leaving the context as loaded"
+    if not lms_binary():
+        # Loading is the only way to set the context size, and that needs the
+        # CLI. Without it LM Studio just-in-time loads the model at whatever
+        # default it was last configured with, which is where an unexplained
+        # 4096 comes from. Report it; do not query a server we cannot act on.
+        return False, (
+            "the lms CLI was not found, so the context size cannot be set and the "
+            "server will use its own default. lms ships inside LM Studio: run "
+            "~/.lmstudio/bin/lms bootstrap once, then restart meetnotes."
+        )
 
     needed = required_context(prompt_chars)
     ceiling = 0
@@ -252,8 +301,11 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
             log(f"loading {cfg.llm.model} with {size} tokens of context")
         ok, detail = load_model(cfg.llm.model, size)
         if ok:
-            _check_room(cfg, size, needed)
-            return True, detail
+            # A zero exit says the command was accepted, not that the size was
+            # honoured. Ask the server what it actually loaded.
+            achieved = _resident_context(cfg) or size
+            _check_room(cfg, achieved, needed)
+            return True, f"loaded {cfg.llm.model} with {achieved} tokens of context"
         last = (detail or "").splitlines()[0][:160] if detail else ""
         if log:
             log(f"  {size} did not load: {last}")
@@ -267,10 +319,11 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
 
 
 def loaded() -> list[str]:
-    if not shutil.which("lms"):
+    lms = lms_binary()
+    if not lms:
         return []
     try:
-        done = subprocess.run(["lms", "ps"], capture_output=True, text=True, timeout=15)
+        done = subprocess.run([lms, "ps"], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         return []
     return [line.strip() for line in done.stdout.splitlines() if line.strip()]
@@ -290,7 +343,11 @@ def catalog(cfg) -> list[dict]:
             resp = client.get(v0, headers=_headers(cfg))
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
-                if data and "quantization" in data[0]:
+                # Any entry identifies the schema. Testing only the first meant
+                # one unusual entry at the front dropped the whole response back
+                # to /v1/models, losing the load state that decides whether a
+                # model needs loading at all.
+                if any("quantization" in item or "state" in item for item in data):
                     return [
                         {
                             "id": item.get("id", ""),

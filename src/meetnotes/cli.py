@@ -14,7 +14,6 @@
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -416,11 +415,18 @@ def cmd_llm_check(cfg, args) -> int:
                 "  above is holding the card. LM Studio keeps several models resident\n"
                 "  at once: `lms ps` lists them, `lms unload --all` evicts them."
             )
-    print(f"lms CLI    {'yes' if shutil.which('lms') else 'no (auto context unavailable)'}")
-    if shutil.which("lms"):
-        resident = llm.loaded()
-        for line in resident[:12]:
+    lms = llm.lms_binary()
+    print(f"lms CLI    {lms or 'NOT FOUND'}")
+    if lms:
+        for line in llm.loaded()[:12]:
             print(f"  lms ps   {line}")
+    else:
+        print(
+            "\n  Without it meetnotes cannot set the context size or unload a\n"
+            "  model, so LM Studio loads at its own default (often 4096) and a\n"
+            "  second copy stacks on the first. lms ships inside LM Studio; run\n"
+            "  ~/.lmstudio/bin/lms bootstrap once, then restart meetnotes."
+        )
 
     payload = {
         "model": cfg.llm.model,

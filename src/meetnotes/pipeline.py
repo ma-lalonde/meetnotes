@@ -233,8 +233,14 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
         # trades a precise reason for an opaque out-of-memory from the server.
         needed = len(source) + len(cfg.llm.summary_prompt)
         ok, detail = llm.fit_context(cfg, needed)
-        if ok and progress:
+        if progress:
             progress(detail)
+        if not ok:
+            # Not fatal, since another server may size its own context, but it
+            # has to survive the run: a truncated prompt otherwise shows up only
+            # as a summary that quietly covers less than the whole meeting.
+            store.update_meta(path, warning=detail)
+            meta["warning"] = detail
 
     def ticker(stage: str):
         if not progress:
