@@ -13,6 +13,15 @@ additive, but macOS has no monitor device and would need ScreenCaptureKit.
 
 ## Setup
 
+If [uv](https://docs.astral.sh/uv/getting-started/installation/) is not already
+installed:
+
+```bash
+wget -qO- https://astral.sh/uv/install.sh | sh
+```
+
+Then:
+
 ```bash
 git clone https://github.com/YOUR-USER/meetnotes.git
 cd meetnotes
@@ -24,15 +33,6 @@ The first launch downloads dependencies and a speech model, so give it a few
 minutes. After that it starts immediately.
 
 No Python environment to create, no packages to install by hand.
-
-If `uv` is not already installed:
-
-```bash
-wget -qO- https://astral.sh/uv/install.sh | sh
-```
-
-See [the uv install page](https://docs.astral.sh/uv/getting-started/installation/)
-for other methods.
 
 ### Summaries (optional)
 
