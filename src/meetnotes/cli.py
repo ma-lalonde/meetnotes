@@ -290,9 +290,16 @@ def cmd_record(cfg, args) -> int:
     if args.no_process:
         print(f"\nno markdown written (--no-process). Generate it with:\n  meetnotes process {path}")
         return 0
-    report = pipeline.process(path, cfg, progress=lambda step: print(f"-- {step}", flush=True))
+    report = pipeline.process(path, cfg, progress=_print_step)
     _print_report(path, report)
     return 0
+
+
+def _print_step(step: str, fraction: float | None = None) -> None:
+    percent = f"{fraction * 100:3.0f}%" if fraction is not None else "  --"
+    print(f"\r{percent}  {step:<48}", end="", flush=True)
+    if step == "done":
+        print()
 
 
 def _print_report(path, report: dict) -> None:
@@ -316,7 +323,7 @@ def cmd_process(cfg, args) -> int:
     try:
         report = pipeline.process(
             path, cfg, force=args.force, with_llm=not args.no_llm,
-            progress=lambda step: print(f"-- {step}", flush=True),
+            progress=_print_step,
         )
     except store.Busy as exc:
         print(f"busy: {exc}")

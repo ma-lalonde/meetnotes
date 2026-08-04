@@ -37,6 +37,7 @@ class Session:
         self.started_at = 0.0
         # Meeting id -> what it is doing right now, for the Library to show.
         self.active: dict[str, str] = {}
+        self.fraction: dict[str, float] = {}
 
     @property
     def recording(self) -> bool:
@@ -150,13 +151,15 @@ class Session:
         return path
 
     def process_async(self, path: Path, force: bool = False) -> None:
-        def step(name: str) -> None:
+        def step(name: str, fraction: float | None = None) -> None:
             self.active[path.name] = name
+            if fraction is not None:
+                self.fraction[path.name] = max(0.0, min(1.0, fraction))
             self.on_state("processing", f"{path.name}: {name}")
 
         def run():
             try:
-                step("starting")
+                step("starting", 0.0)
                 report = pipeline.process(path, self.cfg, force=force, progress=step)
                 self.on_state("done", f"{path.name}: {_summarise(report)}")
             except store.Busy:
@@ -166,6 +169,7 @@ class Session:
                 self.on_state("failed", f"{path.name}: {exc}")
             finally:
                 self.active.pop(path.name, None)
+                self.fraction.pop(path.name, None)
 
         threading.Thread(target=run, daemon=True, name="finalizer").start()
 

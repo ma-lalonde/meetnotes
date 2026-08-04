@@ -13,6 +13,7 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
+import inspect
 import json
 import re
 import uuid
@@ -33,6 +34,44 @@ def _audio_fingerprint(path: Path, meta: dict, plan: dict, cfg) -> str:
     )
 
 
+# Rough share of total time per stage, so the bar moves at a believable rate
+# rather than jumping. Transcription dominates; the calendar is instant.
+STAGES = [
+    ("transcribing", 0.55),
+    ("writing transcripts", 0.05),
+    ("summarizing", 0.20),
+    ("extracting actions", 0.18),
+    ("writing calendar", 0.02),
+]
+
+
+def _reporter(progress):
+    """Accept both progress(step) and progress(step, fraction).
+
+    The fraction was added later; callers that only want the label should not
+    have to change.
+    """
+    if progress is None:
+        return None
+    try:
+        wanted = len(inspect.signature(progress).parameters)
+    except (TypeError, ValueError):
+        wanted = 2
+    if wanted >= 2:
+        return progress
+    return lambda step, fraction=None: progress(step)
+
+
+def stage_fraction(name: str) -> float:
+    """Fraction complete once the named stage has finished."""
+    total = 0.0
+    for stage, weight in STAGES:
+        total += weight
+        if stage == name:
+            return total
+    return total
+
+
 def _slug(text: str, index: int) -> str:
     base = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:48] or "action"
     return f"{index:02d}-{base}.ics"
@@ -40,6 +79,7 @@ def _slug(text: str, index: int) -> str:
 
 def transcribe(path: Path, cfg, force: bool = False, progress=None) -> list[dict]:
     """Full-file pass over every track. Returns merged segments."""
+    progress = _reporter(progress)
     meta = store.read_meta(path)
     plan = hardware.plan(cfg)
     if not plan["final_model"]:
@@ -58,7 +98,7 @@ def transcribe(path: Path, cfg, force: bool = False, progress=None) -> list[dict
         if not track.exists():
             continue
         if progress:
-            progress(f"transcribing {label}")
+            progress(f"transcribing {label}", stage_fraction("transcribing") * 0.5)
         for seg in asr.transcribe_file(track, cfg, plan):
             segments.append({**seg, "speaker": label})
     segments.sort(key=lambda s: s["start"])
@@ -77,12 +117,13 @@ def transcribe(path: Path, cfg, force: bool = False, progress=None) -> list[dict
 def process(path: Path, cfg, force: bool = False, with_llm: bool = True, progress=None) -> dict:
     """Idempotent post-processing. Safe to call repeatedly."""
     report: dict[str, str] = {}
+    progress = _reporter(progress)
     with store.exclusive(path):
         store.update_meta(path, state="transcribing", error="")
         segments = transcribe(path, cfg, force=force, progress=progress)
         meta = store.read_meta(path)
         if progress:
-            progress("writing transcripts")
+            progress("writing transcripts", stage_fraction("transcribing"))
 
         base = artifacts.sha(segments, meta.get("notes", []), meta.get("run", {}))
         report["transcription.md"] = artifacts.ensure(
@@ -131,23 +172,43 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
     source = outputs.transcript_for_llm(meta, segments)
     meta.update(store.read_meta(path))
 
+    def ticker(stage: str):
+        if not progress:
+            return None
+        base = stage_fraction(stage) - dict(STAGES)[stage]
+        span = dict(STAGES)[stage]
+
+        def report_tokens(count: int):
+            # No way to know the total ahead of time, so approach the end of
+            # this stage asymptotically rather than pretending to a percentage.
+            share = 1.0 - (1.0 / (1.0 + count / 250.0))
+            progress(f"{stage} ({count} tokens)", base + span * share)
+
+        return report_tokens
+
     if progress:
-        progress("summarizing")
+        progress("summarizing", stage_fraction("writing transcripts"))
     report["summary.md"] = artifacts.ensure(
         path, meta, "summary.md",
         artifacts.sha(source, cfg.llm.summary_prompt, cfg.llm.model),
-        lambda: llm.chat(cfg, cfg.llm.summary_prompt, source) + "\n", force,
+        lambda: llm.chat(
+            cfg, cfg.llm.summary_prompt, source, on_token=ticker("summarizing")
+        ) + "\n",
+        force,
     )
 
     if progress:
-        progress("extracting actions")
+        progress("extracting actions", stage_fraction("summarizing"))
     actions_print = artifacts.sha(
         source, cfg.llm.actions_prompt, cfg.llm.model, prompts.ACTIONS_SCHEMA_VERSION
     )
     report["actions.json"] = artifacts.ensure(
         path, meta, "actions.json", actions_print,
         lambda: json.dumps(
-            llm.chat(cfg, cfg.llm.actions_prompt, source, prompts.ACTIONS_SCHEMA, "actions"),
+            llm.chat(
+                cfg, cfg.llm.actions_prompt, source, prompts.ACTIONS_SCHEMA, "actions",
+                on_token=ticker("extracting actions"),
+            ),
             indent=2, ensure_ascii=False,
         ) + "\n",
         force,
@@ -165,8 +226,12 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
         path, meta, "actions.md", artifacts.sha(actions),
         lambda: outputs.render_actions(meta, actions), force,
     )
+    if progress:
+        progress("writing calendar", stage_fraction("extracting actions"))
     _write_calendar(path, meta, actions)
     store.write_meta(path, meta)
+    if progress:
+        progress("done", 1.0)
     return report
 
 

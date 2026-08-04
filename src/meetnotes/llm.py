@@ -152,7 +152,43 @@ def list_models(cfg) -> list[str]:
         raise LlmError(f"cannot reach {url}: {exc}") from exc
 
 
-def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: str = "result"):
+def _stream(cfg, url: str, payload: dict, on_token) -> str:
+    """Server-sent events from an OpenAI-compatible endpoint.
+
+    A single blocking request reports nothing until it finishes, which for a
+    long summary looks indistinguishable from a hang. Streaming gives a token
+    count to show instead.
+    """
+    payload = {**payload, "stream": True}
+    pieces = []
+    with httpx.Client(timeout=cfg.llm.timeout) as client:
+        with client.stream("POST", url, json=payload, headers=_headers(cfg)) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                if resp.status_code in (400, 422) and "ttl" in payload:
+                    payload.pop("ttl")
+                    return _stream(cfg, url, payload, on_token)
+                resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                body = line[5:].strip()
+                if body == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(body)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or [{}]
+                piece = (choices[0].get("delta") or {}).get("content") or ""
+                if piece:
+                    pieces.append(piece)
+                    on_token(len(pieces))
+    return "".join(pieces)
+
+
+def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: str = "result",
+         on_token=None):
     if not cfg.llm.model:
         raise LlmError("no LLM model selected in Settings")
     url = cfg.llm.base_url.rstrip("/") + "/chat/completions"
@@ -176,13 +212,16 @@ def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: s
         payload["ttl"] = cfg.llm.ttl_seconds
 
     try:
-        with httpx.Client(timeout=cfg.llm.timeout) as client:
-            resp = client.post(url, json=payload, headers=_headers(cfg))
-            if resp.status_code in (400, 422) and "ttl" in payload:
-                payload.pop("ttl")
+        if on_token is not None:
+            content = _stream(cfg, url, payload, on_token)
+        else:
+            with httpx.Client(timeout=cfg.llm.timeout) as client:
                 resp = client.post(url, json=payload, headers=_headers(cfg))
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
+                if resp.status_code in (400, 422) and "ttl" in payload:
+                    payload.pop("ttl")
+                    resp = client.post(url, json=payload, headers=_headers(cfg))
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
         raise LlmError(f"{cfg.llm.model} at {url}: {exc}") from exc
 

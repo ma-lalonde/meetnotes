@@ -75,9 +75,12 @@ def test_retry_after_configuring_the_llm_completes(meeting, monkeypatch):
     pipeline.process(path, cfg)
 
     cfg.llm.model = "good-model"
-    monkeypatch.setattr(llm, "chat", lambda cfg_, system, user, schema=None, schema_name="r": (
-        {"actions": []} if schema else "## Context\nfine"
-    ))
+    monkeypatch.setattr(
+        llm, "chat",
+        lambda cfg_, system, user, schema=None, schema_name="r", on_token=None: (
+            {"actions": []} if schema else "## Context\nfine"
+        ),
+    )
     report = pipeline.process(path, cfg)
 
     assert report["summary.md"] == "written"

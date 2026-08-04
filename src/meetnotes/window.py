@@ -362,7 +362,9 @@ class LibraryScreen(QWidget):
             state = meta.get("state", "")
             step = self.session.active.get(meta["id"], "")
             if step:
-                state = f"{state} - {step}"
+                percent = self.session.fraction.get(meta["id"])
+                suffix = f" ({percent * 100:.0f}%)" if percent is not None else ""
+                state = f"{state} - {step}{suffix}"
                 running = True
             elif state in self.RUNNING_STATES:
                 running = True
@@ -919,7 +921,20 @@ class MainWindow(QWidget):
 
         self.status = QLabel("Ready")
         theme.muted(self.status)
-        self.stack.setCornerWidget(self.status)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1000)
+        self.progress.setTextVisible(False)
+        self.progress.setMaximumWidth(140)
+        self.progress.setMaximumHeight(12)
+        self.progress.hide()
+
+        corner = QWidget()
+        corner_row = QHBoxLayout(corner)
+        corner_row.setContentsMargins(0, 0, 6, 0)
+        corner_row.addWidget(self.status)
+        corner_row.addWidget(self.progress)
+        self.stack.setCornerWidget(corner)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.banner)
@@ -979,6 +994,17 @@ class MainWindow(QWidget):
 
     def on_state(self, state: str, detail: str):
         self.status.setText(f"{state}: {detail}" if detail else state)
+        fractions = list(self.session.fraction.values())
+        if state == "processing" and fractions:
+            self.progress.setValue(int(min(fractions) * 1000))
+            self.progress.show()
+        elif state == "processing":
+            # Working, but nothing has reported a fraction yet.
+            self.progress.setRange(0, 0)
+            self.progress.show()
+        else:
+            self.progress.setRange(0, 1000)
+            self.progress.hide()
         # Every transition, not just the terminal ones: the Library is the only
         # place that shows a job is still running.
         self.library.reload()

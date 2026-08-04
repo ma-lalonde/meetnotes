@@ -41,6 +41,7 @@ def test_pipeline_reports_each_step(meeting):
     cfg.llm.model = "fake"
     steps = []
     try:
+        # One-argument callbacks are still supported.
         pipeline.process(path, cfg, progress=steps.append)
     except llm.LlmError:
         pass
