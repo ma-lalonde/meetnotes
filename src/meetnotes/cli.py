@@ -267,8 +267,24 @@ def cmd_prompt(cfg, args) -> int:
 
     system = cfg.llm.actions_prompt if args.which == "actions" else cfg.llm.summary_prompt
     user = outputs.transcript_for_llm(meta, segments)
+    # Roughly four characters per token for English and French.
+    estimate = (len(system) + len(user)) // 4
     print(f"\nsystem prompt        {len(system)} characters")
     print(f"transcript sent      {len(user)} characters")
+    print(f"estimated tokens     ~{estimate}")
+
+    context = _model_context(cfg)
+    if context:
+        print(f"model context limit  {context}")
+        if estimate > context * 0.75:
+            print(
+                f"\nTOO LONG FOR THE CONTEXT WINDOW: ~{estimate} tokens of input against a\n"
+                f"{context}-token limit. LM Studio truncates the prompt, leaving the model\n"
+                "no room to answer, which comes back as an empty summary.\n"
+                "Raise the context length when loading the model in LM Studio."
+            )
+    else:
+        print("model context limit  unknown (server does not report it)")
     if not spoken:
         print("\nNOTHING TO SUMMARIZE: no transcript segments carry any speech.")
         print("The language model is not the problem; transcription produced nothing.")
@@ -282,6 +298,113 @@ def cmd_prompt(cfg, args) -> int:
         print("\nfirst 800 characters of what would be sent:\n")
         print(user[:800] or "(empty)")
         print("\nre-run with --full to see all of it")
+    return 0
+
+
+def _model_context(cfg) -> int:
+    """The selected model's context length, when the server reports one."""
+    from . import llm
+
+    if not cfg.llm.model:
+        return 0
+    try:
+        for entry in llm.catalog(cfg):
+            if entry.get("id") == cfg.llm.model:
+                return int(entry.get("context") or 0)
+    except Exception:
+        pass
+    return 0
+
+
+def cmd_llm_check(cfg, args) -> int:
+    """Exercise the language model server and show exactly what it returns."""
+    import json as jsonlib
+
+    import httpx
+
+    from . import llm
+
+    base = cfg.llm.base_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {cfg.llm.api_key or 'none'}"}
+    print(f"base url   {base}")
+    print(f"model      {cfg.llm.model or '(none selected)'}")
+
+    try:
+        names = llm.list_models(cfg)
+        print(f"models     {len(names)} available")
+        if cfg.llm.model and cfg.llm.model not in names:
+            print(f"  WARNING: '{cfg.llm.model}' is not in the list. Available:")
+            for name in names[:15]:
+                print(f"    {name}")
+    except llm.LlmError as exc:
+        print(f"models     FAILED: {exc}")
+        print(
+            "\nLM Studio checklist:\n"
+            "  1. Developer tab > Status: the server must be Running\n"
+            "  2. the port must match the base URL above (default 1234)\n"
+            "  3. 'Serve on Local Network' is not required for localhost"
+        )
+        return 1
+
+    if not cfg.llm.model:
+        print("\nNo model selected. Models tab, or edit config.json.")
+        return 1
+
+    context = _model_context(cfg)
+    if context:
+        print(f"context    {context} tokens")
+        if context < 8192:
+            print(
+                "  A meeting transcript rarely fits in this. Load the model with a\n"
+                "  larger context length in LM Studio, 16384 or more."
+            )
+
+    payload = {
+        "model": cfg.llm.model,
+        "messages": [{"role": "user", "content": "Reply with the single word: ready"}],
+        "max_tokens": 2000,
+    }
+
+    print("\n--- plain request ---")
+    try:
+        with httpx.Client(timeout=cfg.llm.timeout) as client:
+            resp = client.post(base + "/chat/completions", json=payload, headers=headers)
+        print(f"status     {resp.status_code}")
+        body = resp.json()
+        choice = (body.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        print(f"content    {message.get('content')!r}")
+        if not (message.get("content") or "").strip():
+            for key in ("reasoning_content", "reasoning"):
+                if message.get(key):
+                    print(
+                        f"\n  The answer came back under '{key}' with content empty.\n"
+                        "  This model spends its budget reasoning and never emits an answer.\n"
+                        "  Pick a non-reasoning model, or raise its context length."
+                    )
+            print(f"\n  finish_reason: {choice.get('finish_reason')}")
+            print(f"  usage: {body.get('usage')}")
+            print(f"\n  raw first choice:\n{jsonlib.dumps(choice, indent=2)[:900]}")
+    except (httpx.HTTPError, ValueError) as exc:
+        print(f"           FAILED: {exc}")
+        return 1
+
+    print("\n--- streaming request ---")
+    try:
+        with httpx.Client(timeout=cfg.llm.timeout) as client:
+            with client.stream(
+                "POST", base + "/chat/completions",
+                json={**payload, "stream": True}, headers=headers,
+            ) as resp:
+                print(f"status     {resp.status_code}")
+                shown = 0
+                for line in resp.iter_lines():
+                    if line.strip() and shown < 6:
+                        print(f"  {line[:160]}")
+                        shown += 1
+                print(f"  ...{shown} lines shown")
+    except httpx.HTTPError as exc:
+        print(f"           FAILED: {exc}")
     return 0
 
 
@@ -436,6 +559,8 @@ def main(argv=None) -> int:
     ui.add_argument("--check", action="store_true", help="build every screen offscreen and exit")
     ui.add_argument("--platform", default="", help="override QT_QPA_PLATFORM, e.g. xcb or wayland")
 
+    subs.add_parser("llm-check", help="test the language model server and show its reply")
+
     shown = subs.add_parser("prompt", help="show what would be sent to the language model")
     shown.add_argument("meeting")
     shown.add_argument("--which", choices=["summary", "actions"], default="summary")
@@ -487,6 +612,7 @@ def main(argv=None) -> int:
         "language": cmd_language,
         "vocabulary": cmd_vocabulary,
         "prompt": cmd_prompt,
+        "llm-check": cmd_llm_check,
         "ui": cmd_ui,
         "sources": cmd_sources,
         "record": cmd_record,
