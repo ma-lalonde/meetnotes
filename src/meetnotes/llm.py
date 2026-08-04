@@ -99,6 +99,78 @@ def unload_all() -> tuple[bool, str]:
     return True, (done.stdout or "unloaded").strip()[:200]
 
 
+CONTEXT_STEPS = (4096, 8192, 16384, 32768, 65536, 131072)
+
+
+def required_context(prompt_chars: int, reserve: int = 2000) -> int:
+    """Context needed for a prompt of this size, rounded to a sane step.
+
+    Roughly four characters per token for English and French, plus room for the
+    answer and twenty percent of slack, because the estimate is only that.
+    """
+    estimate = int(prompt_chars / 4 * 1.2) + reserve
+    for step in CONTEXT_STEPS:
+        if step >= estimate:
+            return step
+    return CONTEXT_STEPS[-1]
+
+
+def load_model(model: str, context: int, gpu: str = "max") -> tuple[bool, str]:
+    """Load a model at a given context length via the lms CLI.
+
+    The OpenAI-compatible API has no context parameter: the size is fixed when
+    the model is loaded, so changing it means reloading.
+    """
+    if not shutil.which("lms"):
+        return False, "the lms CLI is not on PATH"
+    try:
+        done = subprocess.run(
+            ["lms", "load", model, f"--context-length={context}", f"--gpu={gpu}", "--yes"],
+            capture_output=True, text=True, timeout=600,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    if done.returncode != 0:
+        return False, (done.stderr or done.stdout).strip()[:300]
+    return True, f"loaded {model} with {context} tokens of context"
+
+
+def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
+    """Reload the model with enough context for this transcript.
+
+    Whether the result fits in VRAM is measured rather than predicted: the
+    architecture details needed to compute a KV cache size are not exposed by
+    the API, so a failed load is the signal, and the next smaller size is
+    tried.
+    """
+    if not shutil.which("lms"):
+        # Reloading is the only way to change the context size, and that needs
+        # the CLI. Without it, do not even query the server.
+        return False, "the lms CLI is not on PATH, leaving the context as loaded"
+
+    wanted = required_context(prompt_chars)
+    ceiling = 0
+    for entry in catalog(cfg):
+        if entry.get("id") == cfg.llm.model:
+            ceiling = int(entry.get("context") or 0)
+            break
+    if ceiling:
+        wanted = min(wanted, ceiling)
+    if cfg.llm.max_context:
+        wanted = min(wanted, cfg.llm.max_context)
+
+    sizes = [size for size in CONTEXT_STEPS if size <= wanted] or [CONTEXT_STEPS[0]]
+    for size in reversed(sizes):
+        if log:
+            log(f"loading {cfg.llm.model} with {size} tokens of context")
+        ok, detail = load_model(cfg.llm.model, size)
+        if ok:
+            return True, detail
+        if log:
+            log(f"  {size} did not load: {detail.splitlines()[0][:120] if detail else ''}")
+    return False, f"could not load {cfg.llm.model} at any context size"
+
+
 def loaded() -> list[str]:
     if not shutil.which("lms"):
         return []

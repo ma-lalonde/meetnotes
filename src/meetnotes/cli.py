@@ -14,6 +14,7 @@
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -273,18 +274,30 @@ def cmd_prompt(cfg, args) -> int:
     print(f"transcript sent      {len(user)} characters")
     print(f"estimated tokens     ~{estimate}")
 
+    from . import llm
+
     context = _model_context(cfg)
+    wanted = llm.required_context(len(system) + len(user))
+    print(f"context needed       {wanted}")
     if context:
         print(f"model context limit  {context}")
         if estimate > context * 0.75:
             print(
                 f"\nTOO LONG FOR THE CONTEXT WINDOW: ~{estimate} tokens of input against a\n"
                 f"{context}-token limit. LM Studio truncates the prompt, leaving the model\n"
-                "no room to answer, which comes back as an empty summary.\n"
-                "Raise the context length when loading the model in LM Studio."
+                "no room to answer, which comes back as an empty summary."
             )
+            if cfg.llm.auto_context:
+                print("Post-processing will reload the model at a larger size automatically.")
+            else:
+                print("Turn on auto_context, or reload the model with a larger context.")
     else:
         print("model context limit  unknown (server does not report it)")
+
+    gpus = hardware.nvidia()
+    if gpus:
+        gpu = gpus[0]
+        print(f"gpu free             {gpu.get('free_mb', 0)} MB of {gpu['vram_mb']} MB")
     if not spoken:
         print("\nNOTHING TO SUMMARIZE: no transcript segments carry any speech.")
         print("The language model is not the problem; transcription produced nothing.")
@@ -356,8 +369,13 @@ def cmd_llm_check(cfg, args) -> int:
         if context < 8192:
             print(
                 "  A meeting transcript rarely fits in this. Load the model with a\n"
-                "  larger context length in LM Studio, 16384 or more."
+                "  larger context length in LM Studio, 16384 or more, or let\n"
+                "  auto_context reload it for you."
             )
+    gpus = hardware.nvidia()
+    if gpus:
+        print(f"gpu        {gpus[0].get('free_mb', 0)} MB free of {gpus[0]['vram_mb']} MB")
+    print(f"lms CLI    {'yes' if shutil.which('lms') else 'no (auto context unavailable)'}")
 
     payload = {
         "model": cfg.llm.model,

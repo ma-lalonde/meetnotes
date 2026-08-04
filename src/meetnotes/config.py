@@ -81,6 +81,10 @@ class Llm:
     keep_asr_loaded: bool = False
     ttl_seconds: int = 300
     free_vram_before_recording: bool = True
+    # Reload the model with a context length sized to the transcript. Needs the
+    # lms CLI; ignored without it.
+    auto_context: bool = True
+    max_context: int = 0
     summary_prompt: str = prompts.SUMMARY
     actions_prompt: str = prompts.ACTIONS
     cleanup_prompt: str = prompts.CLEANUP

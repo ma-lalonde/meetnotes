@@ -218,6 +218,15 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
     source = outputs.transcript_for_llm(meta, segments)
     meta.update(store.read_meta(path))
 
+    if cfg.llm.auto_context and cfg.llm.model:
+        # A transcript that overruns the context window is silently truncated,
+        # leaving the model no room to answer. Size the window to the input.
+        # Does nothing without the lms CLI, including no network call.
+        needed = len(source) + len(cfg.llm.summary_prompt)
+        ok, detail = llm.fit_context(cfg, needed)
+        if ok and progress:
+            progress(detail)
+
     def ticker(stage: str):
         if not progress:
             return None
