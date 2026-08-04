@@ -60,6 +60,12 @@ class Asr:
     # Names and jargon the recogniser should expect. Whisper has no speaker
     # enrolment, but it does accept lexical hints.
     vocabulary: list[str] = field(default_factory=list)
+    # Run GPU recognition in a child process. CTranslate2's caching allocator
+    # never returns VRAM to the driver while the process lives, so without this
+    # the speech model holds the card for as long as the app runs and the
+    # language model has nothing left to load into. Off only for debugging.
+    isolate_gpu: bool = True
+    worker_timeout: float = 3600.0
 
 
 @dataclass
@@ -109,7 +115,15 @@ class Config:
             raw = json.loads(CONFIG_PATH.read_text())
         except (OSError, json.JSONDecodeError):
             return cls()
+        return cls.from_dict(raw)
 
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Config":
+        """Rebuild from as_dict output, ignoring anything unrecognised.
+
+        Also how a worker process receives the running settings, which may
+        differ from what is on disk if they were changed but not saved.
+        """
         kwargs = {}
         for spec in fields(cls):
             if spec.name not in raw:

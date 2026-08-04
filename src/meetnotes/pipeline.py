@@ -136,7 +136,10 @@ def transcribe(path: Path, cfg, force: bool = False, progress=None) -> list[dict
             continue
         if progress:
             progress(f"transcribing {label}", stage_fraction("transcribing") * 0.5)
-        for seg in asr.transcribe_file(track, cfg, plan):
+        # On GPU this runs in a child process: its exit is the only thing that
+        # gives the VRAM back before the language model needs it.
+        run = asr.transcribe_file_isolated if asr.isolated(cfg, plan) else asr.transcribe_file
+        for seg in run(track, cfg, plan):
             segments.append({**seg, "speaker": label})
     segments.sort(key=lambda s: s["start"])
 
@@ -206,11 +209,11 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
     report: dict[str, str] = {}
     store.update_meta(path, state="summarizing")
     if not cfg.llm.keep_asr_loaded:
+        # Only meaningful for in-process CPU models. GPU recognition already
+        # released its memory by exiting; nothing in this process can free it.
         asr.unload_all()
         if progress:
-            # Whisper and the language model are the two candidates for holding
-            # the card. Reporting free VRAM at the handover says which one.
-            progress(f"freed the speech model.{llm.vram_note()}")
+            progress(f"speech model released.{llm.vram_note()}")
 
     spoken = [s for s in segments if outputs.clean_text(s.get("text", ""))]
     if not spoken and not meta.get("notes"):

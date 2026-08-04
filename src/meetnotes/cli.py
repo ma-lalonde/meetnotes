@@ -63,10 +63,25 @@ def cmd_doctor(cfg, args) -> int:
 
 
 def cmd_gpu(cfg, args) -> int:
+    from . import asr
+
     rows = hardware.cuda_diagnostics()
+    plan = hardware.plan(cfg)
+    rows.append(("recognition device", plan["device"]))
+    rows.append((
+        "recognition process",
+        "child process, VRAM freed on exit" if asr.isolated(cfg, plan)
+        else "in this process",
+    ))
     width = max(len(k) for k, _ in rows)
     for key, value in rows:
         print(f"{key.ljust(width)}  {value}")
+
+    procs = hardware.gpu_processes()
+    if procs:
+        print("\nholding VRAM now:")
+        for proc in procs:
+            print(f"  {proc['used_mb']:>6} MB  {proc['name']} (pid {proc['pid']})")
     state = hardware.cuda_state()
     print(f"\n{state['detail']}")
     if not args.install:

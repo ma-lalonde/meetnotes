@@ -13,6 +13,9 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
+import json
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -99,19 +102,65 @@ def get_model(name: str, device: str, compute_type: str):
 
 
 def unload_all() -> None:
-    """Release the speech models and the VRAM they hold.
+    """Drop the speech models held by this process.
 
-    Dropping the reference is not enough on its own: CTranslate2 frees device
-    memory in the destructor, so anything keeping the object alive in a cycle
-    keeps the VRAM too. Collecting makes the release happen now rather than
-    whenever the collector next runs, which here is after the language model
-    has already tried to load.
+    On CPU this returns the memory. On GPU it does not, and cannot: CTranslate2
+    allocates through a caching allocator that never releases to the driver
+    while the process lives. That is why GPU work runs in a child process (see
+    worker.py) whose exit is the actual release.
     """
     import gc
 
     with _model_lock:
         _models.clear()
     gc.collect()
+
+
+def _worker_command() -> list[str]:
+    return [sys.executable, "-m", "meetnotes.worker"]
+
+
+def isolated(cfg, plan: dict) -> bool:
+    """Whether recognition should run in a child process.
+
+    Only GPU work needs it, and only GPU work pays the startup cost of loading
+    the model again in a fresh process.
+    """
+    return plan.get("device") == "cuda" and cfg.asr.isolate_gpu
+
+
+class WorkerError(RuntimeError):
+    pass
+
+
+def transcribe_file_isolated(
+    path: Path, cfg, plan: dict, extra_terms: list[str] | None = None
+) -> list[dict]:
+    """transcribe_file in a child process, so the VRAM comes back on exit."""
+    request = {
+        "mode": "file",
+        "path": str(path),
+        "config": cfg.as_dict(),
+        "plan": plan,
+        "extra_terms": extra_terms or [],
+    }
+    done = subprocess.run(
+        _worker_command(),
+        input=json.dumps(request) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=cfg.asr.worker_timeout,
+    )
+    payload = {}
+    for line in done.stdout.splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    if "segments" in payload:
+        return payload["segments"]
+    detail = payload.get("error") or (done.stderr or "").strip()[-400:]
+    raise WorkerError(f"transcription worker failed ({done.returncode}): {detail}")
 
 
 def _pack(segments, offset: float, language: str) -> list[dict]:
@@ -283,3 +332,82 @@ class LiveTrack(threading.Thread):
 
     def stop(self) -> None:
         self.stop_flag.set()
+
+
+class LiveWorker(threading.Thread):
+    """A LiveTrack running in a child process, pumping its output to the sink.
+
+    Interchangeable with LiveTrack, and used instead of it on GPU: the live
+    model would otherwise hold its VRAM for as long as the application runs,
+    which is exactly when the language model needs the card.
+    """
+
+    def __init__(self, path: Path, speaker: str, cfg, plan: dict, sink):
+        super().__init__(daemon=True, name=f"live-worker-{speaker}")
+        self.path = path
+        self.speaker = speaker
+        self.cfg = cfg
+        self.plan = plan
+        self.sink = sink
+        self.error = ""
+        self.process: subprocess.Popen | None = None
+        self.stop_flag = threading.Event()
+        self._starting = threading.Lock()
+
+    def run(self) -> None:
+        request = {
+            "mode": "live",
+            "path": str(self.path),
+            "speaker": self.speaker,
+            "config": self.cfg.as_dict(),
+            "plan": self.plan,
+        }
+        try:
+            with self._starting:
+                self.process = subprocess.Popen(
+                    _worker_command(),
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, bufsize=1,
+                )
+            self.process.stdin.write(json.dumps(request) + "\n")
+            self.process.stdin.flush()
+            # A stop that arrived while the child was starting has nothing to
+            # close yet, so it is applied here instead of being lost.
+            if self.stop_flag.is_set():
+                self._close_stdin()
+            for line in self.process.stdout:
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "segment" in payload:
+                    self.sink(payload["segment"])
+                elif "error" in payload:
+                    self.error = payload["error"]
+            self.process.wait(timeout=120)
+            if self.process.returncode and not self.error:
+                self.error = (self.process.stderr.read() or "").strip()[-400:]
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+
+    def _close_stdin(self) -> None:
+        with self._starting:
+            process = self.process
+        if not process or not process.stdin:
+            return
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+
+    def stop(self) -> None:
+        # Closing stdin is the clean stop: the child runs its final flush and
+        # emits the tail of the buffer before exiting.
+        self.stop_flag.set()
+        self._close_stdin()
+
+
+def live_track(path: Path, speaker: str, cfg, plan: dict, sink):
+    """A live recogniser, in this process or a child depending on the device."""
+    factory = LiveWorker if isolated(cfg, plan) else LiveTrack
+    return factory(path, speaker, cfg, plan, sink)

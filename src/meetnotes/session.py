@@ -104,7 +104,7 @@ class Session:
 
         plan = hardware.plan(self.cfg)
         self.tracks = [
-            asr.LiveTrack(track_path, label, self.cfg, plan, self._sink)
+            asr.live_track(track_path, label, self.cfg, plan, self._sink)
             for label, track_path in self.recorder.paths.items()
         ]
         for track in self.tracks:
