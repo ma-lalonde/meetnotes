@@ -17,10 +17,11 @@ htmlcov/
 *.tmp
 meeting.lock
 
-# Editors
+# Editors and tooling caches
 .idea/
 .vscode/
 *.swp
+.token-savior-cache.json
 
 # uv.lock is intentionally committed: this is an application, so the exact
 # resolved versions are part of what makes a checkout reproducible.
