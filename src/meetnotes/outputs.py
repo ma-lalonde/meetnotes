@@ -63,34 +63,41 @@ def render_provenance(meta: dict) -> list[str]:
         lines[0] = lines[0][:-1] + f" on {run['gpu']}."
     detected = ", ".join(languages) if languages else run.get("language", "auto")
     lines.append(f"> Language: {detected}.")
-    return lines + [""]
+    # One blockquote, so the two lines stay together as a single block.
+    return ["\n".join(lines)]
+
+
+def _document(blocks: list[str]) -> str:
+    """Join blocks with blank lines between them.
+
+    Markdown treats a single newline as a soft break and folds the lines into
+    one paragraph, which runs every timecode together. Separate blocks are the
+    portable fix; trailing double spaces work too but are invisible and get
+    stripped by editors and linters.
+    """
+    return "\n\n".join(block for block in blocks if block is not None).strip() + "\n"
 
 
 def render_transcript(meta: dict, segments: list[dict], clean: bool) -> str:
-    lines = [f"# {meta['title']}", "", f"Recorded {meta['created']}", ""]
-    lines += render_provenance(meta)
+    blocks = [f"# {meta['title']}", f"Recorded {meta['created']}"]
+    blocks += render_provenance(meta)
     last_speaker = None
     for seg in segments:
         text = clean_text(seg["text"]) if clean else seg["text"]
         if not text:
             continue
         if seg["speaker"] != last_speaker:
-            lines.append("")
-            lines.append(f"**{seg['speaker']}**")
-            lines.append("")
+            blocks.append(f"**{seg['speaker']}**")
             last_speaker = seg["speaker"]
-        lines.append(f"[{clock(seg['start'])}] {text}")
-    return "\n".join(lines).strip() + "\n"
+        blocks.append(f"[{clock(seg['start'])}] {text}")
+    return _document(blocks)
 
 
 def render_notes(meta: dict) -> str:
-    lines = [f"# Notes - {meta['title']}", ""]
     notes = meta.get("notes", [])
-    for note in notes:
-        lines.append(f"- [{clock(note['at'])}] {note['text']}")
-    if not notes:
-        lines.append("None")
-    return "\n".join(lines) + "\n"
+    # A list is already a block per item, so single newlines are correct here.
+    body = "\n".join(f"- [{clock(note['at'])}] {note['text']}" for note in notes) or "None"
+    return _document([f"# Notes - {meta['title']}", body])
 
 
 # A cut leaving less than this share on either side is not worth making; the
@@ -253,30 +260,25 @@ def merge_notes(segments: list[dict], notes: list[dict]) -> list[dict]:
 
 
 def render_transcript_with_notes(meta: dict, segments: list[dict]) -> str:
-    lines = [f"# {meta['title']}", "", f"Recorded {meta['created']}", ""]
-    lines += render_provenance(meta)
-    lines.append("Notes taken during the meeting appear inline, marked NOTE.")
-    lines.append("")
+    blocks = [f"# {meta['title']}", f"Recorded {meta['created']}"]
+    blocks += render_provenance(meta)
+    blocks.append("Notes taken during the meeting appear inline, marked NOTE.")
 
     last_speaker = None
     for item in merge_notes(segments, meta.get("notes", [])):
         if item["kind"] == "note":
-            lines.append("")
-            lines.append(f"> **NOTE** [{clock(item['start'])}] {item['text']}")
-            lines.append("")
+            blocks.append(f"> **NOTE** [{clock(item['start'])}] {item['text']}")
             last_speaker = None
             continue
         text = clean_text(item["text"])
         if not text:
             continue
         if item["speaker"] != last_speaker:
-            lines.append("")
-            lines.append(f"**{item['speaker']}**")
-            lines.append("")
+            blocks.append(f"**{item['speaker']}**")
             last_speaker = item["speaker"]
         marker = "..." if item.get("continued") else ""
-        lines.append(f"[{clock(item['start'])}] {marker}{text}")
-    return "\n".join(lines).strip() + "\n"
+        blocks.append(f"[{clock(item['start'])}] {marker}{text}")
+    return _document(blocks)
 
 
 def transcript_for_llm(meta: dict, segments: list[dict]) -> str:
@@ -311,13 +313,15 @@ def render_actions(meta: dict, actions: list[dict]) -> str:
     events = [a for a in actions if a.get("kind") == "event"]
     dated = [a for a in actions if a.get("due")]
 
-    lines = [f"# Actions - {meta['title']}", "", "## Action items", ""]
-    lines += _bullets(todos) or ["None"]
-    lines += ["", "## Scheduled", ""]
-    lines += _bullets(events) or ["None"]
-    lines += ["", "## Dates mentioned", ""]
-    lines += [f"- {a['due']} - {a['task']}" for a in dated] or ["None"]
-    return "\n".join(lines) + "\n"
+    return _document([
+        f"# Actions - {meta['title']}",
+        "## Action items",
+        "\n".join(_bullets(todos)) or "None",
+        "## Scheduled",
+        "\n".join(_bullets(events)) or "None",
+        "## Dates mentioned",
+        "\n".join(f"- {a['due']} - {a['task']}" for a in dated) or "None",
+    ])
 
 
 def _bullets(actions: list[dict]) -> list[str]:
