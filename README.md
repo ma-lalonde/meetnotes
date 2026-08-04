@@ -13,9 +13,9 @@ additive, but macOS has no monitor device and would need ScreenCaptureKit.
 
 ## Setup
 
-Two commands.
-
 ```bash
+git clone https://github.com/YOUR-USER/meetnotes.git
+cd meetnotes
 sudo apt install pipewire-bin pulseaudio-utils libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0
 ./meetnotes
 ```
@@ -23,8 +23,16 @@ sudo apt install pipewire-bin pulseaudio-utils libgl1 libegl1 libxkbcommon-x11-0
 The first launch downloads dependencies and a speech model, so give it a few
 minutes. After that it starts immediately.
 
-Needs [uv](https://docs.astral.sh/uv/getting-started/installation/). Nothing
-else - no Python environment to create, no packages to install by hand.
+No Python environment to create, no packages to install by hand.
+
+If `uv` is not already installed:
+
+```bash
+wget -qO- https://astral.sh/uv/install.sh | sh
+```
+
+See [the uv install page](https://docs.astral.sh/uv/getting-started/installation/)
+for other methods.
 
 ### Summaries (optional)
 
@@ -145,6 +153,13 @@ GPU both use the same `large-v3-turbo` weights, loaded once.
 what the summary reads. A note only means something next to the speech that
 prompted it; appended at the end, the model has to re-align timecodes itself and
 does it badly. The prompt states that NOTE lines were never spoken aloud.
+
+A note typed mid-sentence **splits that sentence**, so it sits between what
+prompted it and what followed rather than after the whole utterance. The final
+pass records word timestamps, so the cut falls after the last word that had
+finished being spoken - a word still in progress belongs after the note, since
+the note cannot be reacting to a word not yet heard. The remainder is marked
+`...continued`.
 
 **Re-running is safe.** Each artifact records a fingerprint of its inputs and a
 hash of what was written. Unchanged inputs are skipped, changed inputs

@@ -40,6 +40,8 @@ class Asr:
     commit_seconds: float = 2.0
     live_beam_size: int = 1
     final_beam_size: int = 5
+    # Needed to split a sentence at the exact word a note was typed against.
+    word_timestamps: bool = True
 
 
 @dataclass

@@ -85,7 +85,7 @@ def process(path: Path, cfg, force: bool = False, with_llm: bool = True, progres
         )
         report["transcription_cleaned_with_notes.md"] = artifacts.ensure(
             path, meta, "transcription_cleaned_with_notes.md",
-            artifacts.sha(base, outputs.filler_version(), "interleaved"),
+            artifacts.sha(base, outputs.filler_version(), "interleaved-split"),
             lambda: outputs.render_transcript_with_notes(meta, segments), force,
         )
         store.write_meta(path, meta)

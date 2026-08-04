@@ -78,15 +78,91 @@ def render_notes(meta: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def split_segment(segment: dict, at: float) -> tuple[dict, dict] | None:
+    """Cut a segment in two at a moment inside it.
+
+    The cut falls after the last word that had finished being spoken. A word
+    still in progress when the note was typed belongs to the part after it,
+    because the note cannot have been reacting to a word not yet heard.
+
+    Word timestamps from the final pass give the real boundary. Without them
+    the split is proportional to elapsed time and snapped to a word gap, which
+    is approximate but never lands mid-word.
+    """
+    start, end = segment["start"], segment["end"]
+    if not (start < at < end):
+        return None
+
+    words = segment.get("words")
+    if words:
+        head = [w for w in words if w[1] <= at]
+        tail = [w for w in words if w[1] > at]
+        if not head or not tail:
+            return None
+        before_text = "".join(w[2] for w in head).strip()
+        after_text = "".join(w[2] for w in tail).strip()
+        boundary = head[-1][1]
+    else:
+        text = segment["text"]
+        fraction = (at - start) / (end - start)
+        cut = int(len(text) * fraction)
+        space = text.rfind(" ", 0, cut)
+        if space <= 0:
+            space = text.find(" ", cut)
+        if space <= 0:
+            return None
+        before_text, after_text = text[:space].strip(), text[space:].strip()
+        boundary = at
+
+    if not before_text or not after_text:
+        return None
+
+    before = {**segment, "end": round(boundary, 2), "text": before_text}
+    after = {**segment, "start": round(boundary, 2), "text": after_text, "continued": True}
+    for part, keep in ((before, "head"), (after, "tail")):
+        if words:
+            part["words"] = head if keep == "head" else tail
+    return before, after
+
+
 def merge_notes(segments: list[dict], notes: list[dict]) -> list[dict]:
     """Interleave notes with speech on one timeline.
 
-    A note sorts to the moment it was typed, so it lands next to whatever was
-    being said then. Ties put the note after the speech that prompted it.
+    A note typed while someone was mid-sentence splits that sentence, so the
+    note sits between what prompted it and what followed instead of after the
+    whole utterance.
     """
-    timeline = [{**s, "kind": "speech"} for s in segments]
-    timeline += [{"kind": "note", "start": n["at"], "text": n["text"]} for n in notes]
-    timeline.sort(key=lambda item: (item["start"], item["kind"] == "note"))
+    pending = sorted(notes, key=lambda n: n["at"])
+    timeline = []
+    queue = sorted(segments, key=lambda s: s["start"])
+    index = 0
+
+    while index < len(queue):
+        segment = queue[index]
+        index += 1
+        # Strictly before: a note stamped exactly at a segment's start still
+        # belongs after it, since a note reacts to what was just said.
+        while pending and pending[0]["at"] < segment["start"]:
+            note = pending.pop(0)
+            timeline.append({"kind": "note", "start": note["at"], "text": note["text"]})
+
+        inside = next((n for n in pending if segment["start"] < n["at"] < segment["end"]), None)
+        parts = split_segment(segment, inside["at"]) if inside else None
+        if parts:
+            pending.remove(inside)
+            before, after = parts
+            timeline.append({**before, "kind": "speech"})
+            timeline.append({"kind": "note", "start": inside["at"], "text": inside["text"]})
+            queue.insert(index, after)
+            continue
+
+        timeline.append({**segment, "kind": "speech"})
+        while pending and pending[0]["at"] <= segment["end"]:
+            note = pending.pop(0)
+            timeline.append({"kind": "note", "start": note["at"], "text": note["text"]})
+
+    for note in pending:
+        timeline.append({"kind": "note", "start": note["at"], "text": note["text"]})
     return timeline
 
 
@@ -112,7 +188,8 @@ def render_transcript_with_notes(meta: dict, segments: list[dict]) -> str:
             lines.append(f"**{item['speaker']}**")
             lines.append("")
             last_speaker = item["speaker"]
-        lines.append(f"[{clock(item['start'])}] {text}")
+        marker = "...continued " if item.get("continued") else ""
+        lines.append(f"[{clock(item['start'])}] {marker}{text}")
     return "\n".join(lines).strip() + "\n"
 
 

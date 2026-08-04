@@ -70,16 +70,25 @@ def unload_all() -> None:
 
 
 def _pack(segments, offset: float, language: str) -> list[dict]:
-    return [
-        {
+    packed = []
+    for s in segments:
+        if not s.text.strip():
+            continue
+        entry = {
             "start": round(s.start + offset, 2),
             "end": round(s.end + offset, 2),
             "text": s.text.strip(),
             "language": language or getattr(s, "language", "") or "",
         }
-        for s in segments
-        if s.text.strip()
-    ]
+        words = getattr(s, "words", None)
+        if words:
+            # Compact triples rather than dicts: an hour of speech is roughly
+            # ten thousand of these and they only exist to locate a boundary.
+            entry["words"] = [
+                [round(w.start + offset, 2), round(w.end + offset, 2), w.word] for w in words
+            ]
+        packed.append(entry)
+    return packed
 
 
 def transcribe_file(path: Path, cfg, plan: dict) -> list[dict]:
@@ -91,6 +100,7 @@ def transcribe_file(path: Path, cfg, plan: dict) -> list[dict]:
             str(path),
             beam_size=cfg.asr.final_beam_size,
             vad_filter=True,
+            word_timestamps=cfg.asr.word_timestamps,
             **language_args(cfg),
         )
         return _pack(segments, 0.0, language_args(cfg).get("language") or "")
@@ -112,6 +122,7 @@ def transcribe_file(path: Path, cfg, plan: dict) -> list[dict]:
             piece,
             beam_size=cfg.asr.final_beam_size,
             vad_filter=True,
+            word_timestamps=cfg.asr.word_timestamps,
             language=language or None,
         )
         out.extend(_pack(segments, start / rate, language))
