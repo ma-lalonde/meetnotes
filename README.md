@@ -23,7 +23,7 @@ wget -qO- https://astral.sh/uv/install.sh | sh
 Then:
 
 ```bash
-git clone https://github.com/YOUR-USER/meetnotes.git
+git clone https://github.com/ma-lalonde/meetnotes.git
 cd meetnotes
 sudo apt install pipewire-bin pulseaudio-utils libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0
 ./meetnotes
