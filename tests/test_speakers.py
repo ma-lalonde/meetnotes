@@ -49,7 +49,7 @@ def recording(tmp_path, monkeypatch):
     cfg.capture.system_source = "2"
     # Unloading is unconditional now, so it has to be stubbed rather than
     # switched off. Without the lms CLI it is a no-op anyway.
-    monkeypatch.setattr(llm, "unload_all", lambda: (False, "no lms in tests"))
+    monkeypatch.setattr(llm, "unload_everything", lambda cfg: (False, "no server in tests"))
 
     started = {}
 

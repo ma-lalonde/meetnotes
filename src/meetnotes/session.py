@@ -86,7 +86,7 @@ class Session:
         )
         # Always: the language model has no reason to hold VRAM during a
         # meeting, and the speech model is about to need it.
-        freed, detail = llm.unload_all()
+        freed, detail = llm.unload_everything(self.cfg)
         if freed:
             self.on_state("idle", f"freed GPU memory: {detail}")
 

@@ -306,7 +306,7 @@ def test_language_models_are_always_unloaded_before_recording():
     from meetnotes import session
 
     source = inspect.getsource(session.Session.start)
-    assert "llm.unload_all()" in source
+    assert "llm.unload_everything(self.cfg)" in source
     assert "free_vram_before_recording" not in source
 
 

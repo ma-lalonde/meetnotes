@@ -146,10 +146,80 @@ def lms_binary() -> str:
     return ""
 
 
+def _v1(cfg, path: str) -> str:
+    """A native LM Studio endpoint, alongside the OpenAI-compatible one."""
+    base = cfg.llm.base_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return f"{base}/api/v1/{path.lstrip('/')}"
+
+
+def rest_instances(cfg) -> list[dict]:
+    """Loaded model instances, from LM Studio's native model list.
+
+    Instances rather than models: the same model can be loaded more than once,
+    which is exactly how a card fills up without anything looking wrong.
+    """
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(_v1(cfg, "models"), headers=_headers(cfg))
+            if resp.status_code != 200:
+                return []
+            found = []
+            for entry in resp.json().get("models", []):
+                for instance in entry.get("loaded_instances") or []:
+                    found.append({
+                        "id": instance.get("id") or entry.get("key") or "",
+                        "model": entry.get("key") or "",
+                        "context": (instance.get("config") or {}).get("context_length", 0) or 0,
+                        "size_bytes": entry.get("size_bytes") or 0,
+                    })
+            return found
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return []
+
+
+def rest_unload(cfg, instance_id: str) -> bool:
+    try:
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(
+                _v1(cfg, "models/unload"),
+                json={"instance_id": instance_id}, headers=_headers(cfg),
+            )
+            return resp.status_code < 400
+    except httpx.HTTPError:
+        return False
+
+
+def rest_load(cfg, model: str, context: int) -> tuple[bool, int, str]:
+    """Load over REST. Returns (ok, the context actually applied, detail).
+
+    echo_load_config makes the server report what it settled on, so a request
+    that was accepted but clamped is visible rather than discovered later as a
+    truncated summary.
+    """
+    payload = {
+        "model": model,
+        "context_length": context,
+        "echo_load_config": True,
+    }
+    try:
+        with httpx.Client(timeout=cfg.llm.timeout) as client:
+            resp = client.post(_v1(cfg, "models/load"), json=payload, headers=_headers(cfg))
+            if resp.status_code >= 400:
+                return False, 0, _server_error(resp)
+            body = resp.json()
+            applied = int((body.get("load_config") or {}).get("context_length") or context)
+            return True, applied, f"loaded {model} with {applied} tokens of context"
+    except (httpx.HTTPError, ValueError) as exc:
+        return False, 0, str(exc)
+
+
 def unload(model: str = "") -> tuple[bool, str]:
     """Evict one model, or every loaded model when no name is given.
 
-    LM Studio's REST API has no unload endpoint, but the lms CLI does.
+    Kept for the CLI path; callers that have a config use unload_everything,
+    which prefers REST and does not need the CLI to exist at all.
     """
     lms = lms_binary()
     if not lms:
@@ -164,11 +234,28 @@ def unload(model: str = "") -> tuple[bool, str]:
     return True, (done.stdout or "unloaded").strip()[:200]
 
 
-def unload_all() -> tuple[bool, str]:
-    """Free the GPU by evicting every loaded model.
+def unload_everything(cfg) -> tuple[bool, str]:
+    """Evict every loaded instance, over REST where the server supports it.
 
-    Called before recording so the language model is not squatting on VRAM the
-    speech model is about to need.
+    REST first because lms only reaches PATH when `lms bootstrap` has edited a
+    shell profile, which an application launched from a desktop entry never
+    reads. Falling back to the CLI keeps older LM Studio builds working.
+    """
+    instances = rest_instances(cfg)
+    if instances:
+        done = [i["id"] for i in instances if rest_unload(cfg, i["id"])]
+        if done:
+            return True, f"unloaded {len(done)} instance(s): {', '.join(done[:4])}"
+    if lms_binary():
+        return unload()
+    # Nothing loaded is a success, not a failure.
+    return (not instances), "nothing was loaded" if not instances else "could not unload"
+
+
+def unload_all() -> tuple[bool, str]:
+    """Free the GPU by evicting every loaded model, via the CLI.
+
+    Retained for callers without a config to hand; prefer unload_everything.
     """
     return unload()
 
@@ -186,17 +273,22 @@ ANSWER_RESERVE = 4096
 MIN_CONTEXT = 8192
 
 
-def required_context(prompt_chars: int, reserve: int = ANSWER_RESERVE) -> int:
-    """Context needed for a prompt of this size, rounded to a sane step.
+# Characters per token. Around 4 for English; French runs shorter because
+# accented characters and morphology split more often, so this is deliberately
+# below the English figure and the 20% slack below covers the rest.
+CHARS_PER_TOKEN = 3.5
 
-    Roughly four characters per token for English and French, plus room for the
-    answer and twenty percent of slack, because the estimate is only that.
+
+def required_context(prompt_chars: int, reserve: int = ANSWER_RESERVE) -> int:
+    """Context needed for a prompt of this size.
+
+    Not rounded to a power of two. Nothing requires one: LM Studio's
+    context_length is simply a token count, and rounding 20000 up to 32768
+    reserves KV cache for 12768 tokens that will never be used, which on a card
+    that is already tight is the difference between loading and not.
     """
-    estimate = int(prompt_chars / 4 * 1.2) + reserve
-    for step in CONTEXT_STEPS:
-        if step >= max(estimate, MIN_CONTEXT):
-            return step
-    return CONTEXT_STEPS[-1]
+    estimate = int(prompt_chars / CHARS_PER_TOKEN * 1.2) + reserve
+    return max(estimate, MIN_CONTEXT)
 
 
 _ESTIMATE = re.compile(r"Estimated GPU Memory:\s*([\d.]+)\s*(GB|MB)", re.I)
@@ -292,90 +384,87 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
     copy of the same weights on the card. Always evicting first cannot fail
     that way, and costs one reload.
 
-    Whether a given size fits in VRAM is measured rather than predicted, since
-    the architecture details needed to compute a KV cache size are not exposed
-    by the API. A failed load is the signal, and the next smaller size is tried.
+    One attempt, at the size the transcript needs. No stepping down: a smaller
+    context that loads is not a success, it is a summary of part of the meeting
+    presented as a summary of all of it, and the server truncates silently.
+    Failing here leaves the transcripts intact and says what to change.
     """
-    if not lms_binary():
-        # Loading is the only way to set the context size, and that needs the
-        # CLI. Without it LM Studio just-in-time loads the model at whatever
-        # default it was last configured with, which is where an unexplained
-        # 4096 comes from. Report it; do not query a server we cannot act on.
-        return False, (
-            "the lms CLI was not found, so the context size cannot be set and the "
-            "server will use its own default. lms ships inside LM Studio: run "
-            "~/.lmstudio/bin/lms bootstrap once, then restart meetnotes."
-        )
-
     needed = required_context(prompt_chars)
+    try:
+        entries = catalog(cfg)
+    except LlmError as exc:
+        # The server is not reachable, so there is nothing to unload, size or
+        # load. Not fatal: the caller records it, and the request itself may
+        # still be going somewhere else entirely.
+        return False, f"cannot reach {cfg.llm.base_url} to size the context: {exc}"
+
     ceiling = 0
-    for entry in catalog(cfg):
+    for entry in entries:
         if entry.get("id") == cfg.llm.model:
             ceiling = int(entry.get("context") or 0)
             break
 
     wanted = needed
-    if ceiling:
-        wanted = min(wanted, ceiling)
-    if cfg.llm.max_context:
-        wanted = min(wanted, cfg.llm.max_context)
+    if ceiling and ceiling < wanted:
+        raise ContextTooSmall(
+            f"this transcript needs about {wanted} tokens of context and "
+            f"{cfg.llm.model} supports at most {ceiling}. Use a model with a "
+            f"larger context window, or summarize a shorter recording."
+        )
+    if cfg.llm.max_context and cfg.llm.max_context < wanted:
+        raise ContextTooSmall(
+            f"this transcript needs about {wanted} tokens of context and "
+            f"llm.max_context caps it at {cfg.llm.max_context}. Raise the cap "
+            f"or summarize a shorter recording."
+        )
 
     before = free_vram_mb()
-    freed, detail = unload()
+    freed, detail = unload_everything(cfg)
     if log:
-        log(f"unload --all: {detail}" if freed else f"unload --all FAILED: {detail}")
-    # A zero exit does not prove the memory came back. Say what actually
+        log(f"unload: {detail}" if freed else f"unload FAILED: {detail}")
+    # An accepted unload does not prove the memory came back. Say what actually
     # changed, because "the model is not unloaded" is otherwise invisible here.
     after = free_vram_mb()
     if log and (before or after):
         log(f"free VRAM {before} MB before the unload, {after} MB after")
-    still = [line for line in loaded() if line]
+    still = rest_instances(cfg) or [{"id": line} for line in loaded() if line]
     if log and still:
-        log("STILL LOADED after unload --all: " + " | ".join(still[:6]))
+        log("STILL LOADED after unload: " + " | ".join(i["id"] for i in still[:6]))
 
-    sizes = [size for size in CONTEXT_STEPS if size <= wanted] or [CONTEXT_STEPS[0]]
-    last = ""
-    short = []
-    for size in reversed(sizes):
-        # Ask what it would cost before spending a minute finding out. LM Studio
-        # answers "failed to load model" either way; this turns that into a
-        # number that can be compared against the card.
-        cost, note = estimate_load(cfg.llm.model, size, cfg.llm.gpu_offload)
-        if log and (cost or note):
-            log(f"{size} tokens: estimated {cost or '?'} MB, {after or '?'} MB free")
-        if cost and after and cost > after:
-            short.append((size, cost))
-            if log:
-                log(f"  skipping {size}: needs {cost} MB, {after} MB free")
-            continue
-        if log:
-            log(f"loading {cfg.llm.model} with {size} tokens of context")
-        ok, detail = load_model(cfg.llm.model, size, cfg.llm.gpu_offload)
-        if ok:
-            # A zero exit says the command was accepted, not that the size was
-            # honoured. Ask the server what it actually loaded.
-            achieved = _resident_context(cfg) or size
-            _check_room(cfg, achieved, needed)
-            return True, f"loaded {cfg.llm.model} with {achieved} tokens of context"
-        last = (detail or "").splitlines()[0][:160] if detail else ""
-        if log:
-            log(f"  {size} did not load: {last}")
-
-    if short and len(short) == len(sizes):
-        # Not a context problem: the weights alone do not fit on this card.
-        size, cost = short[-1]
+    cost, note = estimate_load(cfg.llm.model, wanted, cfg.llm.gpu_offload)
+    if log and (cost or note):
+        log(f"{wanted} tokens: estimated {cost or '?'} MB, {after or '?'} MB free")
+    if cost and after and cost > after:
         raise LoadFailed(
-            f"{cfg.llm.model} needs about {cost} MB of VRAM even at {size} tokens "
-            f"of context, but only {after} MB is free.{vram_note()} It is too "
-            f"large for this card at any context size. Use a smaller quantization "
-            f"or a smaller model, or set llm.gpu_offload below max so some layers "
-            f"run on the CPU."
+            f"{cfg.llm.model} needs about {cost} MB of VRAM at the {wanted} tokens "
+            f"this transcript requires, but only {after} MB is free.{vram_note()} "
+            f"Use a smaller quantization or a smaller model, or set "
+            f"llm.gpu_offload below max so some layers run on the CPU."
         )
-    raise LoadFailed(
-        f"could not load {cfg.llm.model} at any context size "
-        f"({sizes[-1]} to {sizes[0]}).{vram_note()} Something else is holding "
-        f"the GPU: check `nvidia-smi` and `lms ps`. Last error: {last or 'none reported'}"
-    )
+
+    if log:
+        log(f"loading {cfg.llm.model} with {wanted} tokens of context")
+    ok, applied, detail = _load(cfg, cfg.llm.model, wanted)
+    if not ok:
+        raise LoadFailed(
+            f"could not load {cfg.llm.model} with {wanted} tokens of context."
+            f"{vram_note()} {detail or 'no reason reported'}"
+        )
+    # Accepted is not the same as applied: the server may clamp the request.
+    achieved = applied or _resident_context(cfg) or wanted
+    _check_room(cfg, achieved, needed)
+    return True, f"loaded {cfg.llm.model} with {achieved} tokens of context"
+
+
+def _load(cfg, model: str, context: int) -> tuple[bool, int, str]:
+    """REST first, then the CLI, so a missing lms is not a dead end."""
+    ok, applied, detail = rest_load(cfg, model, context)
+    if ok:
+        return True, applied, detail
+    if not lms_binary():
+        return False, 0, detail or "no REST load endpoint and no lms CLI"
+    cli_ok, cli_detail = load_model(model, context, cfg.llm.gpu_offload)
+    return cli_ok, 0, cli_detail
 
 
 def loaded() -> list[str]:

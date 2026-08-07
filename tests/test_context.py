@@ -21,8 +21,12 @@ from meetnotes import llm
 from meetnotes.config import Config
 
 
-def test_required_context_rounds_up_to_a_step():
-    assert llm.required_context(100) in llm.CONTEXT_STEPS
+def test_the_context_is_not_rounded_to_a_power_of_two():
+    # Nothing requires one, and rounding 20000 up to 32768 reserves KV cache
+    # for 12768 tokens that will never be used.
+    asked = llm.required_context(60000)
+    assert asked not in llm.CONTEXT_STEPS
+    assert asked == int(60000 / llm.CHARS_PER_TOKEN * 1.2) + llm.ANSWER_RESERVE
 
 
 def test_a_short_transcript_still_gets_room_to_answer():
@@ -37,8 +41,10 @@ def test_a_long_transcript_needs_more():
     assert llm.required_context(60000) >= 16384
 
 
-def test_required_context_never_exceeds_the_largest_step():
-    assert llm.required_context(100_000_000) == llm.CONTEXT_STEPS[-1]
+def test_french_is_costed_above_the_english_rule_of_thumb():
+    # Around 4 characters per token for English; French splits more often, and
+    # underestimating means a prompt that silently does not fit.
+    assert llm.CHARS_PER_TOKEN < 4
 
 
 def test_reserve_leaves_room_for_the_answer():
@@ -96,6 +102,10 @@ def server(monkeypatch):
         monkeypatch.setattr(llm, "load_model", fake_load)
         monkeypatch.setattr(llm, "unload", fake_unload)
         monkeypatch.setattr(llm, "catalog", catalog)
+        # No native REST endpoints, so the CLI fallback is what runs. The REST
+        # path has its own tests.
+        monkeypatch.setattr(llm, "rest_instances", lambda cfg: [])
+        monkeypatch.setattr(llm, "rest_load", lambda cfg, m, c: (False, 0, "no REST"))
         return attempts, unloaded
 
     return make
@@ -122,20 +132,17 @@ def test_a_model_too_big_for_the_card_is_named_as_such(server):
     assert attempts == []
 
 
-def test_a_size_that_fits_is_still_tried_when_a_bigger_one_does_not(server, monkeypatch):
-    attempts, _ = server(131072, free=7600)
-    monkeypatch.setattr(
-        llm, "estimate_load",
-        lambda model, context, gpu="max": (5000 if context <= 8192 else 9000, ""),
-    )
+def test_a_failed_load_is_not_retried_smaller(server):
+    # A smaller context that loads is not a success. The server truncates the
+    # prompt without saying so, and the result reads as a summary of the whole
+    # meeting while covering only the end of it.
+    attempts, _ = server(0)
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    # Short enough that 8192 is genuinely enough, so the skip is what is under
-    # test rather than the shortfall check.
-    ok, _ = llm.fit_context(cfg, 2000)
-    assert ok
-    # The oversized step was skipped without being attempted, not failed.
-    assert attempts == [8192]
+    with pytest.raises(llm.LoadFailed):
+        llm.fit_context(cfg, 60000)
+    assert len(attempts) == 1
+    assert attempts == [llm.required_context(60000)]
 
 
 def test_an_unknown_estimate_does_not_block_the_load(server):
@@ -178,32 +185,15 @@ def test_fit_context_uses_the_size_the_transcript_needs(loads):
     assert attempts == [llm.required_context(60000)]
 
 
-def test_fit_context_steps_down_when_vram_will_not_take_it(loads):
-    # Whether it fits is measured, not predicted: a failed load is the signal.
-    # The step-down still runs, but the size it lands on is too small for this
-    # transcript, so it is reported rather than quietly used.
+def test_a_load_that_will_not_take_the_size_aborts(loads):
+    # One attempt. The alternative is a context that loads but cannot hold the
+    # transcript, which produces a confident summary of part of the meeting.
     attempts = loads(8192)
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    with pytest.raises(llm.ContextTooSmall):
+    with pytest.raises(llm.LoadFailed):
         llm.fit_context(cfg, 60000)
-    assert attempts[0] > 8192
-    assert attempts[-1] == 8192
-    assert attempts == sorted(attempts, reverse=True)
-
-
-def test_a_context_that_cannot_hold_the_transcript_is_refused(loads):
-    # Sending it anyway means the server drops the start of the transcript
-    # without saying so, and the summary silently covers only the end.
-    attempts = loads(4096)
-    cfg = Config()
-    cfg.llm.model = "qwen3-8b"
-    with pytest.raises(llm.ContextTooSmall) as caught:
-        llm.fit_context(cfg, 60000)
-    message = str(caught.value)
-    assert "4096" in message
-    assert str(llm.required_context(60000)) in message
-    assert attempts[-1] == 4096
+    assert attempts == [llm.required_context(60000)]
 
 
 def test_a_short_transcript_is_not_squeezed_into_the_smallest_step(loads):
@@ -215,13 +205,17 @@ def test_a_short_transcript_is_not_squeezed_into_the_smallest_step(loads):
     assert attempts == [llm.MIN_CONTEXT]
 
 
-def test_a_card_that_only_takes_4096_is_refused_rather_than_used(loads):
-    attempts = loads(4096)
+def test_a_clamped_load_is_caught_rather_than_used(server, monkeypatch):
+    # The load succeeds but the server applies a smaller context than asked.
+    entry = {"id": "qwen3-8b", "context": 131072, "state": "loaded",
+             "loaded_context": 4096}
+    server(131072, [entry])
+    monkeypatch.setattr(llm, "rest_load", lambda cfg, m, c: (True, 4096, "clamped"))
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    with pytest.raises(llm.ContextTooSmall):
-        llm.fit_context(cfg, 2000)
-    assert attempts[-1] == 4096
+    with pytest.raises(llm.ContextTooSmall) as caught:
+        llm.fit_context(cfg, 60000)
+    assert "4096" in str(caught.value)
 
 
 def test_the_lms_binary_is_found_where_lm_studio_installs_it(tmp_path, monkeypatch):
@@ -269,17 +263,6 @@ def test_load_passes_only_flags_lms_accepts(monkeypatch):
     flags = {a.split("=")[0] for a in seen["args"] if a.startswith("--")}
     assert flags <= allowed
     assert "--context-length=32768" in seen["args"]
-
-
-def test_without_the_cli_the_reason_names_the_fix(monkeypatch):
-    monkeypatch.setattr(llm, "lms_binary", lambda: "")
-    cfg = Config()
-    cfg.llm.model = "qwen3-8b"
-    ok, detail = llm.fit_context(cfg, 60000)
-    assert not ok
-    # The symptom is the server loading at its own default, so the message has
-    # to point at the cause rather than at the context size.
-    assert "bootstrap" in detail
 
 
 def test_a_load_that_is_silently_clamped_is_caught(server, monkeypatch):
@@ -383,25 +366,27 @@ def test_a_different_resident_model_is_evicted_too(server):
     assert attempts == [llm.required_context(60000)]
 
 
-def test_the_model_maximum_is_respected(loads):
+def test_a_transcript_beyond_the_model_maximum_is_refused(loads):
+    # Clamping to the maximum would load fine and summarize part of it.
     attempts = loads(131072)
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    llm.fit_context(cfg, 500000)
-    assert max(attempts) <= 131072
+    with pytest.raises(llm.ContextTooSmall) as caught:
+        llm.fit_context(cfg, 500000)
+    assert "131072" in str(caught.value)
+    assert attempts == []
 
 
-def test_a_configured_ceiling_is_respected(loads):
+def test_a_configured_ceiling_below_what_is_needed_is_refused(loads):
     attempts = loads(131072)
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
     cfg.llm.max_context = 8192
-    # The cap holds, and capping below what the transcript needs is reported
-    # rather than used, since the shortfall comes from a setting either way.
+    # Within the model's own maximum, so the cap is what refuses it.
     with pytest.raises(llm.ContextTooSmall) as caught:
-        llm.fit_context(cfg, 500000)
-    assert max(attempts) == 8192
+        llm.fit_context(cfg, 60000)
     assert "max_context" in str(caught.value)
+    assert attempts == []
 
 
 def test_a_ceiling_above_what_is_needed_does_not_inflate_the_load(loads):
@@ -426,11 +411,47 @@ def test_load_model_without_the_cli_is_reported_not_raised(monkeypatch):
     assert "lms CLI" in detail
 
 
-def test_fit_context_without_the_cli_makes_no_network_call(monkeypatch):
+def test_an_unreachable_server_is_reported_not_raised(monkeypatch):
+    # Nothing to unload, size or load, and the request may still be going
+    # somewhere else. The caller records it and carries on.
     monkeypatch.setattr(llm, "lms_binary", lambda: "")
-    monkeypatch.setattr(llm, "catalog", lambda cfg: pytest.fail("should not query"))
+    monkeypatch.setattr(
+        llm, "catalog",
+        lambda cfg: (_ for _ in ()).throw(llm.LlmError("connection refused")),
+    )
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
     ok, detail = llm.fit_context(cfg, 60000)
     assert not ok
-    assert "lms CLI" in detail
+    assert "cannot reach" in detail
+
+
+def test_rest_is_used_before_the_cli(monkeypatch):
+    # lms only reaches PATH when `lms bootstrap` has edited a shell profile,
+    # which a windowed application never reads. REST needs no such thing.
+    monkeypatch.setattr(llm, "lms_binary", lambda: "")
+    monkeypatch.setattr(llm, "catalog", lambda cfg: [{"id": "qwen3-8b", "context": 131072}])
+    monkeypatch.setattr(llm, "rest_instances", lambda cfg: [])
+    monkeypatch.setattr(llm, "estimate_load", lambda m, c, g="max": (0, ""))
+    monkeypatch.setattr(llm, "free_vram_mb", lambda: 0)
+    monkeypatch.setattr(llm, "_resident_context", lambda cfg: 0)
+    asked = {}
+
+    def fake_rest_load(cfg, model, context):
+        asked["context"] = context
+        return True, context, "ok"
+
+    monkeypatch.setattr(llm, "rest_load", fake_rest_load)
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, detail = llm.fit_context(cfg, 60000)
+    assert ok
+    assert asked["context"] == llm.required_context(60000)
+
+
+def test_the_rest_url_sits_beside_the_openai_one():
+    cfg = Config()
+    cfg.llm.base_url = "http://localhost:1234/v1"
+    assert llm._v1(cfg, "models/load") == "http://localhost:1234/api/v1/models/load"
+    cfg.llm.base_url = "http://box:5000"
+    assert llm._v1(cfg, "models") == "http://box:5000/api/v1/models"

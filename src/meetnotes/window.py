@@ -944,7 +944,7 @@ class ModelsScreen(QWidget):
             self.summary_note.setText(f"{len(entries)} models offered by this server")
 
     def unload_now(self):
-        freed, detail = llm.unload_all()
+        freed, detail = llm.unload_everything(self.cfg)
         self.status.setText(detail if freed else f"could not unload: {detail}")
 
     def autotune(self):
