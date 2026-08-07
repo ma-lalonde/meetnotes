@@ -224,6 +224,46 @@ def test_show_every_model_waives_only_the_situational_filters():
     assert "medium" not in everything
 
 
+def test_the_list_is_sized_to_the_card_not_to_free_memory():
+    # An 8 GB card is an 8 GB card whether or not LM Studio is holding 6 of
+    # them: recognition runs in its own process after the language model is
+    # unloaded.
+    assert models.vram_budget(8188, 200) == 8188
+    assert models.vram_budget(8188, 7600) == 8188
+    # No card reported: fall back to whatever was measured.
+    assert models.vram_budget(0, 1234) == 1234
+
+
+def test_large_v3_is_offered_on_an_8gb_card_that_is_currently_busy():
+    cfg = _bilingual()
+    budget = models.vram_budget(8188, 200)
+    offered = {c["alias"] for c in
+               models.whisper_choices(cfg, device="cuda", free_mb=budget)}
+    assert "large-v3" in offered
+
+
+def test_an_unlisted_model_says_why_rather_than_that_it_is_unlisted():
+    # "not in the short list" told the reader nothing about the reason.
+    cfg = _bilingual()
+    assert "Turbo" in models.why_not_offered("large-v2", cfg, "cuda", 8188)
+    assert "English" in models.why_not_offered("tiny.en", cfg, "cuda", 8188)
+    reason = models.why_not_offered("small", cfg, "cuda", 8188)
+    assert "Turbo" in reason
+    assert "MB" in models.why_not_offered("large-v3", cfg, "cuda", 1500)
+
+
+def test_an_offered_model_has_no_reason_to_explain():
+    cfg = _bilingual()
+    for choice in models.whisper_choices(cfg, device="cuda", free_mb=8188):
+        # Nothing offered should ever be rendered with an exclusion reason.
+        assert choice["alias"] in {"large-v3", "large-v3-turbo"}
+
+
+def test_an_unknown_model_is_left_alone_with_a_plain_reason():
+    reason = models.why_not_offered("/home/me/my-ct2-model")
+    assert "left as configured" in reason
+
+
 def test_a_retired_model_still_resolves_if_it_is_configured():
     # Never offered, but a config that names one must keep working rather than
     # silently transcribing with something else.

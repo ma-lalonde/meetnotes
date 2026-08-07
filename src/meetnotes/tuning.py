@@ -38,6 +38,19 @@ from . import asr, hardware, llm, models
 # to decide which models are worth offering at all.
 vram_cost_mb = models.vram_cost_mb
 
+
+def speech_vram_mb() -> int:
+    """The card's size, for deciding which speech models are worth trying.
+
+    Not free memory: recognition runs in its own process, after the language
+    model has been unloaded, so what is resident when tuning runs does not
+    limit what recognition can load later.
+    """
+    gpus = hardware.nvidia()
+    if not gpus:
+        return 0
+    return models.vram_budget(gpus[0]["vram_mb"], gpus[0].get("free_mb", 0))
+
 # A live model must transcribe faster than speech arrives or it falls behind
 # without limit. Below this share of realtime it keeps up with headroom.
 LIVE_REALTIME_TARGET = 0.5
@@ -123,7 +136,7 @@ def measure(sample: Path, cfg, log=None) -> list[Measurement]:
     """Time every candidate speech model on one recording."""
     device = "cuda" if hardware.cuda_runtime_ok() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
-    free = llm.free_vram_mb() if device == "cuda" else 0
+    free = speech_vram_mb() if device == "cuda" else 0
     found = []
     for alias in candidates(device, free, compute_type, cfg):
         if log:
@@ -210,9 +223,12 @@ def tune(cfg, sample: Path | None = None, log=None) -> Plan:
         device=device,
         compute_type="float16" if device == "cuda" else "int8",
     )
+    # Speech models are sized against the card; the language model against what
+    # is free, because that one loads into current conditions.
+    card = speech_vram_mb()
     free = llm.free_vram_mb()
-    if device == "cuda" and free:
-        plan.notes.append(f"{free} MB of VRAM free right now")
+    if device == "cuda" and card:
+        plan.notes.append(f"{card} MB of VRAM on this card, {free} MB free right now")
 
     if sample and sample.exists():
         plan.measurements = measure(sample, cfg, log=log)
@@ -220,11 +236,11 @@ def tune(cfg, sample: Path | None = None, log=None) -> Plan:
     if not plan.live:
         # No sample, or nothing ran. The profiles encode the speed judgement
         # that timing would otherwise establish, so the live model keeps them
-        # and free VRAM only ever takes options away.
+        # and memory only ever takes options away.
         profile = hardware.PROFILES["gpu" if device == "cuda" else "cpu"]
         plan.live = profile["live_model"]
         plan.final = profile["final_model"]
-        fits = candidates(device, free, plan.compute_type, cfg)
+        fits = candidates(device, card, plan.compute_type, cfg)
         if device == "cuda" and fits:
             if plan.live not in fits:
                 # fits is largest first, so this is the best that will load.
@@ -237,7 +253,7 @@ def tune(cfg, sample: Path | None = None, log=None) -> Plan:
             plan.final = max(fits, key=lambda a: models.WHISPER_MODELS[a][2])
             if plan.final != profile["final_model"]:
                 plan.notes.append(
-                    f"{models.label(plan.final)} fits in {free} MB, so the final "
+                    f"{models.label(plan.final)} fits on this card, so the final "
                     f"pass uses it instead of {models.label(profile['final_model'])}"
                 )
         if not sample:

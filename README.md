@@ -235,13 +235,18 @@ constraint. Whisper's own figures put Turbo at ~8x against Tiny's ~10x, so a
 card with room for Turbo gains a quarter of the time from the small models and
 loses several tiers of accuracy for it. Memory is the only real limit:
 
-| Free VRAM | Offered |
+| Card | Offered |
 | --- | --- |
-| 7.6 GB | Large v3, Turbo |
-| 3.5 GB | Turbo |
-| 1.5 GB | Small, Base, Tiny |
-| 400 MB | Base, Tiny |
+| 8 GB | Large v3, Turbo |
+| 4 GB | Turbo |
+| 2 GB | Small, Base, Tiny |
 | CPU | Large v3, Turbo, Small, Base, Tiny |
+
+Sized against **the card**, not what is free at that moment. Recognition runs in
+its own process, after the language model has been unloaded, so an 8 GB card is
+an 8 GB card whether or not LM Studio is holding six of them. A list that
+changed because another application was resident when the tab opened would be
+the same friction in a new place.
 
 CPU keeps the full ladder on purpose: the live pass has to beat speech in
 absolute terms, not relative to another model, and how close a given CPU gets is

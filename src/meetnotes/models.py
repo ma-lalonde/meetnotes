@@ -200,6 +200,18 @@ COMPUTE_SCALE = {"float16": 1.0, "int8_float16": 0.6, "int8": 0.55, "float32": 2
 # fit in less memory, so once it fits there is no reason to offer them.
 GPU_ANCHOR = "large-v3-turbo"
 
+def vram_budget(total_mb: int, free_mb: int = 0) -> int:
+    """What the card has, not what happens to be free right now.
+
+    Sizing the menu to a snapshot is why an 8 GB card stops offering Large v3
+    the moment LM Studio loads a model. By the time recognition runs, the
+    language model has been unloaded and recognition has its own process, so
+    the card is what it always was. A list that changes because another
+    application was resident when the tab opened is the friction this is meant
+    to remove.
+    """
+    return total_mb or free_mb
+
 
 def vram_cost_mb(alias: str, compute_type: str) -> int:
     """Rough resident size for a speech model. Zero when the size is unknown."""
@@ -239,6 +251,33 @@ def hardware_pool(device: str, free_mb: int, pool: list[str]) -> tuple[list[str]
         f"as fast as the small models and far more accurate, so only it and "
         f"anything better are offered."
     )
+
+
+def why_not_offered(alias: str, cfg=None, device: str = "", vram_mb: int = 0) -> str:
+    """Why a configured model is missing from the list. Empty if it is not.
+
+    A model that is set but unlisted needs a reason next to it, or the entry
+    reads as an error in the application rather than a considered exclusion.
+    """
+    if alias not in WHISPER_MODELS:
+        return "not a model this knows about; left as configured"
+    installed = [a for a in WHISPER_MODELS if a in repos()]
+    if alias not in frontier(installed):
+        _, _, _, note = WHISPER_MODELS[alias]
+        return f"retired: {note}" if note else "retired: another model beats it for less"
+    if cfg is not None and alias in ENGLISH_ONLY and not english_only_setup(cfg):
+        return "English only, and more than English is expected"
+    if cfg is not None and alias not in ENGLISH_ONLY and english_only_setup(cfg):
+        twin = ENGLISH_TWIN.get(alias)
+        if twin:
+            return f"{WHISPER_MODELS[twin][0]} is the same size and better at English"
+    cost = vram_cost_mb(alias, "float16")
+    if device == "cuda" and vram_mb and cost > vram_mb:
+        return f"needs about {cost} MB, and this GPU has {vram_mb} MB"
+    if device == "cuda" and vram_mb:
+        anchor = WHISPER_MODELS[GPU_ANCHOR][0]
+        return f"{anchor} fits on this GPU and is faster as well as more accurate"
+    return "not offered for this machine"
 
 
 def whisper_choices(cfg=None, all_models: bool = False, device: str = "",

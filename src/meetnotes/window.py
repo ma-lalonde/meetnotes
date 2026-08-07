@@ -839,8 +839,11 @@ class ModelsScreen(QWidget):
         if index < 0 and current:
             # A model chosen before, or hand-edited into the config, that the
             # curated list no longer offers. Keep it rather than silently
-            # switching what runs.
-            combo.addItem(f"{models.label(current)}   (not in the short list)", current)
+            # switching what runs, and say why it is not among the others.
+            reason = models.why_not_offered(
+                current, self.cfg, self._device, self._free_mb
+            )
+            combo.addItem(f"{models.label(current)}  -  {reason}", current)
             index = combo.count() - 1
         combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
@@ -873,7 +876,12 @@ class ModelsScreen(QWidget):
         # a subprocess, so asking it per combo box would double the cost and
         # could hand the two lists different numbers.
         self._device = plan["device"]
-        self._free_mb = gpus[0].get("free_mb", 0) if gpus else 0
+        # The card's size, not what is free this second: recognition runs in
+        # its own process after the language model has been unloaded, so a
+        # model resident right now does not decide what can be offered.
+        self._free_mb = models.vram_budget(
+            gpus[0]["vram_mb"], gpus[0].get("free_mb", 0)
+        ) if gpus else 0
         pool = [c["alias"] for c in models.whisper_choices(self.cfg)]
         _, reason = models.hardware_pool(self._device, self._free_mb, pool)
         self.hardware_note.setText(reason)

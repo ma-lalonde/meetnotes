@@ -106,10 +106,18 @@ def test_english_only_models_are_never_auto_selected():
 
 @pytest.fixture
 def gpu(monkeypatch):
-    """A CUDA machine with a given amount of free VRAM and no lms CLI."""
-    def make(free_mb):
+    """A CUDA machine with a card of a given size, and no lms CLI.
+
+    `free` is deliberately small by default: what another application happens
+    to be holding must not change which speech models are offered.
+    """
+    def make(total_mb, free_mb=200):
         from meetnotes import hardware
         monkeypatch.setattr(hardware, "cuda_runtime_ok", lambda *a, **k: True)
+        monkeypatch.setattr(hardware, "nvidia", lambda: [
+            {"name": "Test GPU", "vram_mb": total_mb,
+             "used_mb": total_mb - free_mb, "free_mb": free_mb},
+        ])
         monkeypatch.setattr(llm, "free_vram_mb", lambda: free_mb)
         monkeypatch.setattr(llm, "lms_binary", lambda: "")
         cfg = Config()
@@ -122,12 +130,21 @@ def gpu(monkeypatch):
 def test_the_final_pass_takes_the_best_model_that_fits(gpu):
     # Latency is cheap after the meeting, and the passes no longer share
     # weights, so there is nothing to gain by reusing the live model.
-    plan = tuning.tune(gpu(7600))
+    plan = tuning.tune(gpu(8188))
     assert plan.live == "large-v3-turbo"
     assert plan.final == "large-v3"
 
 
-def test_the_final_pass_falls_back_when_the_best_does_not_fit(gpu):
+def test_a_loaded_language_model_does_not_shrink_the_speech_list(gpu):
+    # The reported bug: an 8 GB card stopped offering Large v3 whenever LM
+    # Studio was holding memory, even though recognition runs in its own
+    # process after the language model is unloaded.
+    busy = tuning.tune(gpu(8188, free_mb=200))
+    idle = tuning.tune(gpu(8188, free_mb=7600))
+    assert busy.final == idle.final == "large-v3"
+
+
+def test_the_final_pass_falls_back_when_the_card_is_too_small(gpu):
     plan = tuning.tune(gpu(3500))
     assert plan.live == plan.final == "large-v3-turbo"
 
@@ -142,17 +159,17 @@ def test_a_small_card_gets_the_best_that_fits_not_the_smallest(gpu):
 
 def test_every_suggestion_comes_from_the_offered_list(gpu):
     # Suggesting a model the Models tab will not show would be incoherent.
-    for free in (7600, 3500, 1500, 400):
-        cfg = gpu(free)
+    for total in (8188, 3500, 1500, 400):
+        cfg = gpu(total)
         offered = {c["alias"] for c in
-                   models.whisper_choices(cfg, device="cuda", free_mb=free)}
+                   models.whisper_choices(cfg, device="cuda", free_mb=total)}
         plan = tuning.tune(cfg)
-        assert plan.live in offered, f"{plan.live} not offered at {free} MB"
-        assert plan.final in offered, f"{plan.final} not offered at {free} MB"
+        assert plan.live in offered, f"{plan.live} not offered on a {total} MB card"
+        assert plan.final in offered, f"{plan.final} not offered on a {total} MB card"
 
 
 def test_the_upgrade_is_explained(gpu):
-    plan = tuning.tune(gpu(7600))
+    plan = tuning.tune(gpu(8188))
     assert any("final pass" in note for note in plan.notes)
 
 
