@@ -705,6 +705,7 @@ class ModelsScreen(QWidget):
         self.live_note = self._note()
         self.final_note = self._note()
         self.summary_note = self._note()
+        self.language_note = self._note()
         self.vocabulary = QPlainTextEdit("\n".join(cfg.asr.vocabulary))
         self.vocabulary.setPlaceholderText("Chloé Gagnon\nCatena\nPortainer")
         self.vocabulary.setMaximumHeight(110)
@@ -712,6 +713,7 @@ class ModelsScreen(QWidget):
 
         speech = QWidget()
         speech_form = QFormLayout(speech)
+        speech_form.addRow("", self.language_note)
         speech_form.addRow("Live transcription", self.live)
         speech_form.addRow("", self.live_note)
         speech_form.addRow("Final pass", self.final)
@@ -831,6 +833,19 @@ class ModelsScreen(QWidget):
         combo.blockSignals(False)
 
     def reload(self):
+        # The offered models depend on the language setting, which lives on
+        # another screen, so say why the list looks the way it does.
+        if models.english_only_setup(self.cfg):
+            self.language_note.setText(
+                "Expecting English only, so the .en builds are offered in place of "
+                "their multilingual twins: same size, better at English, and no "
+                "other language. Change Language in Settings to get them back."
+            )
+        else:
+            self.language_note.setText(
+                "English-only (.en) models are hidden because more than English is "
+                "expected. They cannot transcribe anything else at all."
+            )
         plan = hardware.plan(self.cfg)
         gpus = hardware.nvidia()
         if gpus:

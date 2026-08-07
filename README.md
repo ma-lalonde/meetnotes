@@ -216,8 +216,25 @@ more accurate than another has no reason to be picked, so it is dropped:
 `large-v2` is Turbo's quality at twice the size, and `distil-large-v3` is
 superseded by `v3.5`. The frontier is computed from size and accuracy rank
 rather than hand-listed, so adding a model cannot leave a stale recommendation
-behind. English-only and multilingual models are ranked separately, since
-neither can substitute for the other.
+behind.
+
+**The list follows the language setting.** English-only (`.en`) models have the
+same parameter count as the multilingual models they were cut from and are
+better at English for it - Whisper's README: they "tend to perform better,
+especially for the `tiny.en` and `base.en` models". They also cannot transcribe
+anything else. So:
+
+| Language setting | Offered |
+| --- | --- |
+| French and English | Large v3, Turbo, Medium, Small, Base, Tiny |
+| English only | Large v3, Turbo, Distil v3.5 EN, Small EN, Base EN, Tiny EN |
+
+On an English-only setup the `.en` builds *replace* their twins rather than
+sitting beside them, since at equal size the twin is simply worse at the only
+language being spoken. Turbo and Large v3 have no `.en` build and stay either
+way. Only those exact same-size pairs are compared across the two classes;
+relative English accuracy between, say, Distil v3.5 and Turbo is not published
+anywhere, so neither displaces the other.
 
 **Why not the 500 MB GGUF whisper builds.** CTranslate2, the engine behind
 faster-whisper, converts from Fairseq, Marian, OpenNMT and Transformers into its

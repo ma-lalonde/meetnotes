@@ -58,16 +58,31 @@ WHISPER_MODELS = {
     # tiny.en and base.en models", and "the difference becomes less
     # significant for the small.en and medium.en models" - which is why the
     # gain is only worth noting on the two smallest.
-    "tiny.en": ("Tiny EN", 39, 1, "clearly better than Tiny on English"),
-    "base.en": ("Base EN", 74, 2, "clearly better than Base on English"),
-    "small.en": ("Small EN", 244, 3, "barely better than Small"),
-    "medium.en": ("Medium EN", 769, 4, "barely better than Medium"),
+    # Notes describe each model on its own terms: an .en model and the
+    # multilingual model it was cut from are never offered together, so a note
+    # comparing them would name something not in the list.
+    "tiny.en": ("Tiny EN", 39, 1, "lowest accuracy, runs anywhere"),
+    "base.en": ("Base EN", 74, 2, "low accuracy"),
+    "small.en": ("Small EN", 244, 3, "fast enough for live on CPU"),
+    "medium.en": ("Medium EN", 769, 4, "middle ground"),
     "distil-large-v3": ("Distil v3 EN", 756, 5, "superseded by Distil v3.5"),
     "distil-large-v3.5": ("Distil v3.5 EN", 756, 6, "very fast"),
 }
 
 ENGLISH_ONLY = {alias for alias in WHISPER_MODELS if alias.endswith(".en")
                 or alias.startswith("distil-")}
+
+# The one cross-class comparison Whisper's README actually supports: an .en
+# model against the multilingual model it was cut from, same parameters, better
+# at English. Only these exact pairs, because relative English accuracy between,
+# say, distil-large-v3.5 and Turbo is not something published anywhere and
+# guessing it would put a made-up number in front of a real choice.
+ENGLISH_TWIN = {
+    "tiny": "tiny.en",
+    "base": "base.en",
+    "small": "small.en",
+    "medium": "medium.en",
+}
 
 
 def dominated(alias: str, others) -> bool:
@@ -159,6 +174,12 @@ def whisper_choices(cfg=None, all_models: bool = False) -> list[dict]:
     pool = [alias for alias in WHISPER_MODELS if alias in known]
     if cfg is not None and not english_only_setup(cfg):
         pool = [alias for alias in pool if alias not in ENGLISH_ONLY]
+    elif cfg is not None:
+        # English and nothing else, so the two classes collapse into one and a
+        # multilingual model whose .en twin is available is strictly the worse
+        # of the two: same size, worse at the only language being spoken.
+        twinned = {base for base, twin in ENGLISH_TWIN.items() if twin in pool}
+        pool = [alias for alias in pool if alias not in twinned]
     keep = pool if all_models else frontier(pool)
     out = []
     for alias in sorted(keep, key=lambda a: (a in ENGLISH_ONLY, -WHISPER_MODELS[a][1])):

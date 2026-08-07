@@ -131,12 +131,31 @@ def test_detect_anything_is_not_an_english_only_setup():
     assert not models.english_only_setup(cfg)
 
 
-def test_an_english_model_still_beats_its_twin_on_english():
-    # Same parameter count, better at English: not a frontier violation, a
-    # different language class. Whisper's README puts the gain at the small end.
-    assert models.WHISPER_MODELS["tiny.en"][1] == models.WHISPER_MODELS["tiny"][1]
-    assert "better" in models.WHISPER_MODELS["tiny.en"][3]
-    assert "barely" in models.WHISPER_MODELS["small.en"][3]
+def test_an_english_model_costs_the_same_as_its_twin():
+    # Same parameter count, better at English, so on an English-only setup the
+    # multilingual one has nothing left to offer.
+    for base, twin in models.ENGLISH_TWIN.items():
+        assert models.WHISPER_MODELS[twin][1] == models.WHISPER_MODELS[base][1]
+
+
+def test_english_only_replaces_the_twins_rather_than_listing_both():
+    cfg = Config()
+    cfg.asr.language_mode = "restrict"
+    cfg.asr.languages = ["en"]
+    offered = {choice["alias"] for choice in models.whisper_choices(cfg)}
+    assert "tiny.en" in offered and "tiny" not in offered
+    assert "base.en" in offered and "base" not in offered
+    # Turbo and Large v3 have no .en build, so they stay either way.
+    assert "large-v3-turbo" in offered
+    assert "large-v3" in offered
+
+
+def test_no_size_is_offered_twice_on_an_english_setup():
+    cfg = Config()
+    cfg.asr.language_mode = "restrict"
+    cfg.asr.languages = ["en"]
+    sizes = [choice["params_m"] for choice in models.whisper_choices(cfg)]
+    assert len(sizes) == len(set(sizes))
 
 
 def test_compute_types_are_reported_for_cpu():
