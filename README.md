@@ -211,15 +211,18 @@ depends on the machine and not on any published number. Language models are
 cost without loading it. The Models tab has the same thing as **Choose for this
 machine**.
 
-**Only models worth choosing are offered.** A model another one beats without
-costing meaningfully more has no reason to be picked, so it is dropped:
+**Retired: never offered, at any setting.** A model another one beats without
+costing meaningfully more is not the right answer on any hardware or in any
+language, so nothing brings it back:
 
-| Dropped | Why |
+| Retired | Why |
 | --- | --- |
-| `large-v2` | Turbo's quality at twice the size |
+| `large-v1`, `large-v2` | Turbo matches large-v2 at half the size |
 | `medium` | Turbo is 5% larger and a whole tier better |
 | `medium.en` | `distil-large-v3.5` is smaller and better |
-| `distil-large-v3` | superseded by `v3.5` |
+| `distil-large-v2`, `distil-large-v3` | superseded by `v3.5` |
+
+A config that still names one keeps working; it just is not offered.
 
 Equal accuracy only displaces at strictly lower cost; a genuine accuracy gain
 displaces within a 10% size margin. The frontier is computed from size and
@@ -243,8 +246,12 @@ loses several tiers of accuracy for it. Memory is the only real limit:
 CPU keeps the full ladder on purpose: the live pass has to beat speech in
 absolute terms, not relative to another model, and how close a given CPU gets is
 not something a relative-speed table can answer. `meetnotes tune --record 30`
-settles it by measurement. **Show every model** in the Models tab disables all of
-this narrowing.
+settles it by measurement.
+
+The hardware and language rules are **situational** - right on one machine,
+wrong on another - so the Models tab can waive both with *Show models this
+machine or language setting rules out*. Retirement is not situational and is
+never waived.
 
 **The list follows the language setting.** English-only (`.en`) models have the
 same parameter count as the multilingual models they were cut from and are

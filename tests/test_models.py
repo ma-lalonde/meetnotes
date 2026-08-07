@@ -168,13 +168,6 @@ def test_no_device_given_narrows_nothing():
     assert plain == cpu
 
 
-def test_show_every_model_overrides_the_hardware_narrowing():
-    everything = {c["alias"] for c in models.whisper_choices(
-        _bilingual(), all_models=True, device="cuda", free_mb=7600)}
-    assert "tiny" in everything
-    assert "medium" in everything
-
-
 def test_the_narrowing_explains_itself_only_when_it_narrows():
     pool = [c["alias"] for c in models.whisper_choices(_bilingual())]
     _, roomy = models.hardware_pool("cuda", 7600, pool)
@@ -208,11 +201,34 @@ def test_every_offered_model_keeps_a_real_size():
         assert choice["params_m"] > 0
 
 
-def test_the_full_list_still_reaches_everything_installed():
-    curated = {choice["alias"] for choice in models.whisper_choices()}
+def test_show_every_model_never_resurrects_a_dominated_one():
+    # Two kinds of filtering. Situational ones can be waived; "another model
+    # beats this at no extra cost" holds on every machine and in every
+    # language, so there is nothing to waive it for.
     everything = {choice["alias"] for choice in models.whisper_choices(all_models=True)}
-    assert curated < everything
-    assert "large-v2" in everything
+    for dead in ("large-v2", "medium", "medium.en", "distil-large-v3", "large-v1"):
+        assert dead not in everything, f"{dead} came back"
+
+
+def test_show_every_model_waives_only_the_situational_filters():
+    cfg = _bilingual()
+    narrowed = {c["alias"] for c in
+                models.whisper_choices(cfg, device="cuda", free_mb=7600)}
+    everything = {c["alias"] for c in
+                  models.whisper_choices(cfg, all_models=True,
+                                         device="cuda", free_mb=7600)}
+    assert narrowed < everything
+    # The hardware narrowing is waived, so the small models return.
+    assert {"small", "base", "tiny"} <= everything
+    # The frontier is not.
+    assert "medium" not in everything
+
+
+def test_a_retired_model_still_resolves_if_it_is_configured():
+    # Never offered, but a config that names one must keep working rather than
+    # silently transcribing with something else.
+    assert models.full_name("large-v2") == "Systran/faster-whisper-large-v2"
+    assert models.label("large-v2") == "Large v2"
 
 
 def test_english_only_models_are_hidden_on_a_bilingual_setup():

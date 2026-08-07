@@ -218,18 +218,28 @@ def tune(cfg, sample: Path | None = None, log=None) -> Plan:
         plan.measurements = measure(sample, cfg, log=log)
         plan.live, plan.final = choose_speech(plan.measurements)
     if not plan.live:
-        # No sample, or nothing ran. The profiles already encode the speed
-        # judgement that timing would otherwise establish, so keep them and let
-        # free VRAM only take options away, never add a slower one.
+        # No sample, or nothing ran. The profiles encode the speed judgement
+        # that timing would otherwise establish, so the live model keeps them
+        # and free VRAM only ever takes options away.
         profile = hardware.PROFILES["gpu" if device == "cuda" else "cpu"]
         plan.live = profile["live_model"]
         plan.final = profile["final_model"]
         fits = candidates(device, free, plan.compute_type, cfg)
         if device == "cuda" and fits:
             if plan.live not in fits:
-                plan.live = fits[-1]
-            if plan.final not in fits:
-                plan.final = fits[-1]
+                # fits is largest first, so this is the best that will load.
+                # Speed is not the binding constraint on a GPU; memory is.
+                plan.live = fits[0]
+            # The final pass runs after the meeting, so it takes the most
+            # accurate model that fits rather than the profile default. The
+            # passes no longer share weights - each runs in its own process -
+            # so there is nothing to gain by reusing the live model here.
+            plan.final = max(fits, key=lambda a: models.WHISPER_MODELS[a][2])
+            if plan.final != profile["final_model"]:
+                plan.notes.append(
+                    f"{models.label(plan.final)} fits in {free} MB, so the final "
+                    f"pass uses it instead of {models.label(profile['final_model'])}"
+                )
         if not sample:
             plan.notes.append(
                 "no sample recording, so speech models were sized rather than timed"

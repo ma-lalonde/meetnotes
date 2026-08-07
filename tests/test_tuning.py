@@ -104,6 +104,58 @@ def test_english_only_models_are_never_auto_selected():
                 assert alias not in models.ENGLISH_ONLY
 
 
+@pytest.fixture
+def gpu(monkeypatch):
+    """A CUDA machine with a given amount of free VRAM and no lms CLI."""
+    def make(free_mb):
+        from meetnotes import hardware
+        monkeypatch.setattr(hardware, "cuda_runtime_ok", lambda *a, **k: True)
+        monkeypatch.setattr(llm, "free_vram_mb", lambda: free_mb)
+        monkeypatch.setattr(llm, "lms_binary", lambda: "")
+        cfg = Config()
+        cfg.asr.language_mode = "restrict"
+        cfg.asr.languages = ["fr", "en"]
+        return cfg
+    return make
+
+
+def test_the_final_pass_takes_the_best_model_that_fits(gpu):
+    # Latency is cheap after the meeting, and the passes no longer share
+    # weights, so there is nothing to gain by reusing the live model.
+    plan = tuning.tune(gpu(7600))
+    assert plan.live == "large-v3-turbo"
+    assert plan.final == "large-v3"
+
+
+def test_the_final_pass_falls_back_when_the_best_does_not_fit(gpu):
+    plan = tuning.tune(gpu(3500))
+    assert plan.live == plan.final == "large-v3-turbo"
+
+
+def test_a_small_card_gets_the_best_that_fits_not_the_smallest(gpu):
+    # fits is ordered largest first; taking the last of it chose Tiny on a card
+    # with room for Small.
+    plan = tuning.tune(gpu(1500))
+    assert plan.live == "small"
+    assert plan.final == "small"
+
+
+def test_every_suggestion_comes_from_the_offered_list(gpu):
+    # Suggesting a model the Models tab will not show would be incoherent.
+    for free in (7600, 3500, 1500, 400):
+        cfg = gpu(free)
+        offered = {c["alias"] for c in
+                   models.whisper_choices(cfg, device="cuda", free_mb=free)}
+        plan = tuning.tune(cfg)
+        assert plan.live in offered, f"{plan.live} not offered at {free} MB"
+        assert plan.final in offered, f"{plan.final} not offered at {free} MB"
+
+
+def test_the_upgrade_is_explained(gpu):
+    plan = tuning.tune(gpu(7600))
+    assert any("final pass" in note for note in plan.notes)
+
+
 def test_an_english_only_setup_may_use_an_english_model():
     cfg = Config()
     cfg.asr.language_mode = "restrict"

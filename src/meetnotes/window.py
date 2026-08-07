@@ -709,7 +709,7 @@ class ModelsScreen(QWidget):
         self.hardware_note = self._note()
         self._device = "cpu"
         self._free_mb = 0
-        self.show_all = QCheckBox("Show every model, including ones this machine should not use")
+        self.show_all = QCheckBox("Show models this machine or language setting rules out")
         self.show_all.toggled.connect(self.reload)
         self.vocabulary = QPlainTextEdit("\n".join(cfg.asr.vocabulary))
         self.vocabulary.setPlaceholderText("Chloé Gagnon\nCatena\nPortainer")

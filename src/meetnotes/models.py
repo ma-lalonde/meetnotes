@@ -50,6 +50,7 @@ WHISPER_MODELS = {
     "small": ("Small", 244, 3, "fast enough for live on CPU"),
     "medium": ("Medium", 769, 4, "superseded by Turbo, which is 5% larger"),
     "large-v3-turbo": ("Turbo", 809, 5, "large-v2 quality at half the size"),
+    "large-v1": ("Large v1", 1550, 4, "superseded by v2 and v3 at the same size"),
     "large-v2": ("Large v2", 1550, 5, "superseded by Turbo"),
     "large-v3": ("Large v3", 1550, 6, "most accurate, slowest"),
     # Same parameter count as their multilingual siblings, and better at
@@ -65,6 +66,7 @@ WHISPER_MODELS = {
     "base.en": ("Base EN", 74, 2, "low accuracy"),
     "small.en": ("Small EN", 244, 3, "fast enough for live on CPU"),
     "medium.en": ("Medium EN", 769, 4, "superseded by Distil v3.5, which is smaller"),
+    "distil-large-v2": ("Distil v2 EN", 756, 4, "superseded by Distil v3.5"),
     "distil-large-v3": ("Distil v3 EN", 756, 5, "superseded by Distil v3.5"),
     "distil-large-v3.5": ("Distil v3.5 EN", 756, 6, "very fast"),
 }
@@ -102,8 +104,8 @@ RELATIVE_SPEED = {
     "small": 4, "small.en": 4,
     "medium": 2, "medium.en": 2,
     "large-v3-turbo": 8,
-    "large-v2": 1, "large-v3": 1,
-    "distil-large-v3": 6, "distil-large-v3.5": 6,
+    "large-v1": 1, "large-v2": 1, "large-v3": 1,
+    "distil-large-v2": 6, "distil-large-v3": 6, "distil-large-v3.5": 6,
 }
 
 
@@ -243,14 +245,23 @@ def whisper_choices(cfg=None, all_models: bool = False, device: str = "",
                     free_mb: int = 0) -> list[dict]:
     """What to offer for a speech step, best-value first.
 
-    Dominated models are dropped by default: a model that is both larger and no
-    more accurate than another is a choice with no upside, and offering it only
-    invites picking it. Given a config, English-only models are dropped too
-    unless the configured languages are English and nothing else, since they
-    cannot transcribe the other language at all.
+    Two kinds of filtering, and only one of them is negotiable.
+
+    A model another one beats without costing meaningfully more is never the
+    right answer on any hardware, in any language, so it is not offered at all
+    and `all_models` does not bring it back. Large v2 and Medium are both that:
+    Turbo matches large-v2 at half the size and beats Medium for five percent
+    more.
+
+    The rest is situational. English-only models are wrong for a bilingual
+    setup and right for an English one; the small models are wrong on a card
+    with room for Turbo and right on one without. Those are what `all_models`
+    turns off, for someone who wants to choose against the recommendation.
     """
     known = repos()
-    pool = [alias for alias in WHISPER_MODELS if alias in known]
+    installed = [alias for alias in WHISPER_MODELS if alias in known]
+    # Applied first and never waived: no setting makes these the right choice.
+    pool = frontier(installed)
     if cfg is not None and not english_only_setup(cfg):
         pool = [alias for alias in pool if alias not in ENGLISH_ONLY]
     elif cfg is not None:
@@ -261,7 +272,8 @@ def whisper_choices(cfg=None, all_models: bool = False, device: str = "",
         pool = [alias for alias in pool if alias not in twinned]
     if not all_models and device:
         pool, _ = hardware_pool(device, free_mb, pool)
-    keep = pool if all_models else frontier(pool)
+    # Re-run: collapsing the English twins can leave a new model dominated.
+    keep = frontier(pool)
     out = []
     for alias in sorted(keep, key=lambda a: (a in ENGLISH_ONLY, -WHISPER_MODELS[a][1])):
         short, size, _, note = WHISPER_MODELS[alias]
