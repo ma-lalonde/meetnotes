@@ -295,9 +295,43 @@ def test_primary_english_counts_as_english_only():
     cfg = Config()
     cfg.asr.language_mode = "primary"
     cfg.asr.language = "en"
+    cfg.asr.languages = ["en"]
     assert models.english_only_setup(cfg)
-    cfg.asr.language = "fr"
+    cfg.asr.language, cfg.asr.languages = "fr", ["fr"]
     assert not models.english_only_setup(cfg)
+
+
+def test_mainly_english_with_some_french_is_not_english_only():
+    # It pins English but French still occurs, so an .en model would be unable
+    # to transcribe part of the meeting.
+    cfg = Config()
+    cfg.asr.language_mode = "primary"
+    cfg.asr.language = "en"
+    cfg.asr.languages = ["en", "fr"]
+    assert not models.english_only_setup(cfg)
+
+
+def test_every_language_choice_stores_a_distinct_value():
+    # Two rows encoding to the same (mode, codes) are indistinguishable once
+    # saved, so the picker cannot restore the one that was chosen.
+    LANGUAGE_CHOICES = models.LANGUAGE_CHOICES
+
+    stored = [(mode, codes) for _, mode, codes in LANGUAGE_CHOICES]
+    assert len(stored) == len(set(stored))
+
+
+def test_only_the_english_only_row_reads_as_english_only():
+    LANGUAGE_CHOICES = models.LANGUAGE_CHOICES
+
+    english = set()
+    for label, mode, codes in LANGUAGE_CHOICES:
+        cfg = Config()
+        cfg.asr.language_mode = mode
+        cfg.asr.languages = list(codes)
+        cfg.asr.language = codes[0] if codes else ""
+        if models.english_only_setup(cfg):
+            english.add(label)
+    assert english == {"English only"}
 
 
 def test_detect_anything_is_not_an_english_only_setup():
@@ -312,6 +346,22 @@ def test_an_english_model_costs_the_same_as_its_twin():
     # multilingual one has nothing left to offer.
     for base, twin in models.ENGLISH_TWIN.items():
         assert models.WHISPER_MODELS[twin][1] == models.WHISPER_MODELS[base][1]
+
+
+def test_the_english_class_is_trimmed_against_its_own_anchor():
+    # Ranks only mean something inside a language class. Comparing Distil
+    # v3.5's English rank against Turbo's multilingual rank reads one scale as
+    # the other, so each class is trimmed against its own anchor.
+    cfg = Config()
+    cfg.asr.language_mode = "restrict"
+    cfg.asr.languages = ["en"]
+    offered = {c["alias"] for c in
+               models.whisper_choices(cfg, device="cuda", free_mb=8188)}
+    assert models.ENGLISH_ANCHOR in offered
+    # Nothing below the English anchor survives on a card with room for it.
+    assert not offered & {"tiny.en", "base.en", "small.en"}
+    # The multilingual class keeps its own anchor and better.
+    assert {"large-v3-turbo", "large-v3"} <= offered
 
 
 def test_english_only_replaces_the_twins_rather_than_listing_both():

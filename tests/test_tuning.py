@@ -272,6 +272,9 @@ def test_apply_writes_every_field_it_decided(tmp_path, monkeypatch):
     assert reloaded.asr.live_model == "large-v3-turbo"
     assert reloaded.asr.final_model == "large-v3"
     assert reloaded.asr.device == "cuda"
+    # In step with the device, or the Profile combo can no longer change it:
+    # hardware.plan gives the explicit device precedence over the profile.
+    assert reloaded.asr.profile == "gpu"
     assert reloaded.llm.model == "qwen3-9b"
     assert reloaded.llm.max_context == 32768
 

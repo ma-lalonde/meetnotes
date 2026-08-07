@@ -30,15 +30,7 @@ from PySide6.QtWidgets import (
 from . import artifacts, audio, hardware, llm, models, outputs, prompts, store, theme
 
 
-# (label, mode, language codes)
-LANGUAGE_CHOICES = [
-    ("French and English", "restrict", ("fr", "en")),
-    ("Mainly French, some English", "primary", ("fr",)),
-    ("Mainly English, some French", "primary", ("en",)),
-    ("French only", "primary", ("fr",)),
-    ("English only", "primary", ("en",)),
-    ("Detect anything", "auto", ()),
-]
+LANGUAGE_CHOICES = models.LANGUAGE_CHOICES
 
 
 class RecordScreen(QWidget):
@@ -665,6 +657,11 @@ class SettingsScreen(QWidget):
         cfg.start_in_tray = self.start_in_tray.isChecked()
         cfg.minimize_on_quit = self.minimize_on_quit.isChecked()
         cfg.asr.profile = self.profile.currentText()
+        # The profile IS the device control here, so keep the explicit device in
+        # step with it. Leaving a stale cfg.asr.device behind, as "Choose for
+        # this machine" used to write, made this combo do nothing at all:
+        # hardware.plan gives the explicit device precedence over the profile.
+        cfg.asr.device = {"gpu": "cuda", "cpu": "cpu"}.get(cfg.asr.profile, "auto")
         mode, codes = self.language.currentData()
         cfg.asr.language_mode = mode
         cfg.asr.languages = list(codes)

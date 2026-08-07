@@ -78,7 +78,7 @@ def test_cpu_profile_when_cuda_absent(monkeypatch):
 def test_cuda_request_downgrades_when_runtime_missing(monkeypatch):
     monkeypatch.setattr(hardware, "cuda_runtime_ok", lambda: False)
     cfg = Config()
-    cfg.asr.device = "cuda"
+    cfg.asr.device = "cuda"  # explicit device wins over the profile
     plan = hardware.plan(cfg)
     assert (plan["device"], plan["compute_type"]) == ("cpu", "int8")
 

@@ -173,6 +173,23 @@ def full_name(alias: str) -> str:
     return repos().get(alias, alias)
 
 
+# (label, mode, language codes). The first code is the one pinned in primary
+# mode; the rest may still occur and are transcribed where they fall. Every row
+# must encode to a distinct (mode, codes) pair, or two choices become the same
+# stored value and the picker cannot tell them apart afterwards.
+#
+# Here rather than in the window so it can be read without Qt, which needs
+# system graphics libraries that a test machine has no reason to have.
+LANGUAGE_CHOICES = [
+    ("French and English", "restrict", ("fr", "en")),
+    ("Mainly French, some English", "primary", ("fr", "en")),
+    ("Mainly English, some French", "primary", ("en", "fr")),
+    ("French only", "primary", ("fr",)),
+    ("English only", "primary", ("en",)),
+    ("Detect anything", "auto", ()),
+]
+
+
 def english_only_setup(cfg) -> bool:
     """Whether this configuration will only ever be given English.
 
@@ -180,11 +197,11 @@ def english_only_setup(cfg) -> bool:
     size, but it cannot transcribe anything else at all, so it is only ever an
     option for someone who has said they only need English.
     """
-    mode = cfg.asr.language_mode
-    if mode == "auto":
+    if cfg.asr.language_mode == "auto":
         return False
-    if mode == "primary":
-        return cfg.asr.language == "en"
+    # The full set of languages that may occur, in either mode. Reading only
+    # the pinned language in primary mode made "mainly English, some French"
+    # look English-only, and it is not.
     codes = {code.strip() for code in cfg.asr.languages if code.strip()}
     return codes == {"en"}
 
@@ -199,6 +216,9 @@ COMPUTE_SCALE = {"float16": 1.0, "int8_float16": 0.6, "int8": 0.55, "float32": 2
 # The model a GPU is expected to run. Anything less accurate than this exists to
 # fit in less memory, so once it fits there is no reason to offer them.
 GPU_ANCHOR = "large-v3-turbo"
+# The same role in the English-only class: fast enough for the live pass and
+# accurate enough that nothing below it is worth offering once it fits.
+ENGLISH_ANCHOR = "distil-large-v3.5"
 
 def vram_budget(total_mb: int, free_mb: int = 0) -> int:
     """What the card has, not what happens to be free right now.
@@ -244,8 +264,19 @@ def hardware_pool(device: str, free_mb: int, pool: list[str]) -> tuple[list[str]
         # smaller ones are the point rather than clutter.
         return fits or pool, ""
 
-    anchor_rank = WHISPER_MODELS[GPU_ANCHOR][2]
-    kept = [a for a in fits if WHISPER_MODELS[a][2] >= anchor_rank]
+    # Ranks only mean anything inside a language class, so each class is
+    # trimmed against its own anchor. Comparing Distil v3.5's English rank
+    # against Turbo's multilingual rank would be reading one scale as the other.
+    kept = []
+    for english, anchor in ((False, GPU_ANCHOR), (True, ENGLISH_ANCHOR)):
+        group = [a for a in fits if (a in ENGLISH_ONLY) == english]
+        if not group:
+            continue
+        if anchor not in group:
+            kept.extend(group)
+            continue
+        floor = WHISPER_MODELS[anchor][2]
+        kept.extend(a for a in group if WHISPER_MODELS[a][2] >= floor)
     return kept, (
         f"This GPU has room for {WHISPER_MODELS[GPU_ANCHOR][0]}, which is about "
         f"as fast as the small models and far more accurate, so only it and "

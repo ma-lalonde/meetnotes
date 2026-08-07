@@ -269,6 +269,10 @@ def tune(cfg, sample: Path | None = None, log=None) -> Plan:
 def apply(plan: Plan, cfg) -> None:
     cfg.asr.live_model = plan.live
     cfg.asr.final_model = plan.final
+    # Both, and in step. hardware.plan gives the explicit device precedence over
+    # the profile, so writing only the device left the Profile combo unable to
+    # change anything afterwards.
+    cfg.asr.profile = "gpu" if plan.device == "cuda" else "cpu"
     cfg.asr.device = plan.device
     cfg.asr.compute_type = plan.compute_type
     if plan.summary_model:
