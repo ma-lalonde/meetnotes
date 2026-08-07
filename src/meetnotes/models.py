@@ -212,6 +212,66 @@ def compute_types(device: str) -> list[str]:
         return ["float32", "int8"]
 
 
+# alias -> (label, what it actually does)
+#
+# CTranslate2 accepts seven of these, but there are only two decisions worth
+# making per device: the normal one, and the one that halves the weights. The
+# rest differ in which precision the *non-quantized* layers use, which for a
+# Whisper model converted from fp16 weights is not a difference anyone can hear.
+PRECISION = {
+    "float32": ("Exact", "full precision, twice the memory of float16"),
+    "float16": ("Balanced", "half precision throughout, the usual choice on a GPU"),
+    "bfloat16": ("Balanced (bf16)", "same size as float16, wider range, needs Ampere or newer"),
+    "int8_float16": ("Half memory", "int8 weights, float16 for everything else"),
+    "int8_bfloat16": ("Half memory (bf16)", "int8 weights, bfloat16 for everything else"),
+    "int8_float32": ("Half memory (fp32 elsewhere)", "int8 weights, float32 for everything else"),
+    "int8": ("Smallest", "int8 weights, the rest at the model's own precision"),
+    "int16": ("16-bit integer", "Intel CPUs with the MKL backend only"),
+}
+
+# The ones worth offering per device, default first.
+PRECISION_CURATED = {
+    "cuda": ["float16", "int8_float16"],
+    "cpu": ["int8", "float32"],
+}
+
+# CTranslate2: "float16, bfloat16: Convert to float32 on CPU". Choosing one on
+# CPU therefore costs float32 memory and buys nothing, which is worth saying out
+# loud rather than leaving in the list looking like an option.
+PRECISION_TRAPS = {
+    "cpu": {
+        "float16": "converted to float32 on CPU, so this costs float32 memory",
+        "bfloat16": "converted to float32 on CPU, so this costs float32 memory",
+    },
+}
+
+
+def precision_choices(device: str, all_types: bool = False) -> list[dict]:
+    """Compute types worth offering for this device, best default first.
+
+    Only what CTranslate2 reports as supported here, so an option that would
+    silently fall back to something else is never presented as a choice.
+    """
+    supported = compute_types(device)
+    traps = PRECISION_TRAPS.get(device, {})
+    wanted = PRECISION_CURATED.get(device, PRECISION_CURATED["cpu"])
+    order = [a for a in wanted if a in supported]
+    if not order:
+        # An old card, or a CUDA build that reports neither float16 nor
+        # int8_float16. Offering only "Automatic" would hide the choice
+        # entirely, so fall back to whatever this machine does support.
+        order = [a for a in supported if a not in traps]
+    if all_types:
+        order += [a for a in supported if a not in order]
+    out = [{"alias": "auto", "label": "Automatic", "note": "chosen from the device"}]
+    for alias in order:
+        label, note = PRECISION.get(alias, (alias, ""))
+        if alias in traps:
+            note = traps[alias]
+        out.append({"alias": alias, "label": label, "note": note})
+    return out
+
+
 def is_language_model(entry: dict) -> bool:
     """Embedding models cannot summarize, so they are not offered."""
     kind = (entry.get("type") or "").lower()

@@ -236,6 +236,23 @@ way. Only those exact same-size pairs are compared across the two classes;
 relative English accuracy between, say, Distil v3.5 and Turbo is not published
 anywhere, so neither displaces the other.
 
+**Precision is two choices, not seven.** CTranslate2 accepts `float32`,
+`float16`, `bfloat16`, `int8`, `int8_float16`, `int8_bfloat16` and
+`int8_float32`, but the `int8_*` variants differ only in the precision of the
+layers that are *not* quantized, which is not audible on a speech model. What is
+offered:
+
+| Device | Offered |
+| --- | --- |
+| GPU | Balanced (`float16`), Half memory (`int8_float16`) |
+| CPU | Smallest (`int8`), Exact (`float32`) |
+
+`float16` and `bfloat16` are **not offered on CPU**: CTranslate2 converts them
+to `float32` there, so picking one costs `float32` memory and gains nothing.
+Nothing unsupported on the current device is listed either, since it would
+silently fall back to something else. A type already set in the config is kept
+even when it is outside this list.
+
 **Why not the 500 MB GGUF whisper builds.** CTranslate2, the engine behind
 faster-whisper, converts from Fairseq, Marian, OpenNMT and Transformers into its
 own `model.bin`; GGUF is llama.cpp's format and is not among them. Separately,

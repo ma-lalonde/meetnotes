@@ -727,7 +727,10 @@ class ModelsScreen(QWidget):
             "is the lever it does have."
         ))
         speech_form.addRow("", self._note(
-            "int8 roughly halves the memory of float16 with little quality cost."
+            "int8 roughly halves the memory of float16 with little quality cost. "
+            "CTranslate2 accepts several more compute types, but they differ only "
+            "in the precision of the layers that are not quantized, which is not "
+            "a difference you can hear on a speech model."
         ))
 
         self.provider = QComboBox()
@@ -871,10 +874,20 @@ class ModelsScreen(QWidget):
 
         self.precision.blockSignals(True)
         self.precision.clear()
-        self.precision.addItem("Automatic", "auto")
-        for name in models.compute_types(plan["device"]):
-            self.precision.addItem(name, name)
+        for choice in models.precision_choices(plan["device"]):
+            note = f"  -  {choice['note']}" if choice["note"] else ""
+            self.precision.addItem(f"{choice['label']}{note}", choice["alias"])
+            self.precision.setItemData(
+                self.precision.count() - 1, choice["alias"], Qt.ToolTipRole
+            )
         index = self.precision.findData(self.cfg.asr.compute_type)
+        if index < 0 and self.cfg.asr.compute_type not in ("", "auto"):
+            # Set before, or hand-edited, and not one of the two offered here.
+            # Keep it rather than silently changing what runs.
+            current = self.cfg.asr.compute_type
+            label = models.PRECISION.get(current, (current, ""))[0]
+            self.precision.addItem(f"{label}  -  {current}", current)
+            index = self.precision.count() - 1
         self.precision.setCurrentIndex(index if index >= 0 else 0)
         self.precision.blockSignals(False)
 

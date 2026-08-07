@@ -163,6 +163,68 @@ def test_compute_types_are_reported_for_cpu():
     assert "int8" in found or "float32" in found
 
 
+def _precision(device, supported, all_types=False, monkeypatch=None):
+    monkeypatch.setattr(models, "compute_types", lambda d: supported)
+    return models.precision_choices(device, all_types=all_types)
+
+
+def test_only_the_two_decisions_are_offered_on_a_gpu(monkeypatch):
+    # CTranslate2 accepts seven compute types; the rest differ only in the
+    # precision of the layers that are not quantized.
+    got = _precision("cuda", [
+        "float32", "float16", "bfloat16", "int8", "int8_float16",
+        "int8_bfloat16", "int8_float32",
+    ], monkeypatch=monkeypatch)
+    assert [c["alias"] for c in got] == ["auto", "float16", "int8_float16"]
+
+
+def test_the_cpu_list_is_int8_and_exact(monkeypatch):
+    got = _precision("cpu", ["float32", "int8", "int8_float32", "int16"],
+                     monkeypatch=monkeypatch)
+    assert [c["alias"] for c in got] == ["auto", "int8", "float32"]
+
+
+def test_float16_is_never_offered_on_cpu(monkeypatch):
+    # CTranslate2 converts float16 and bfloat16 to float32 on CPU, so choosing
+    # one costs float32 memory and buys nothing.
+    got = _precision("cpu", ["float32", "float16", "bfloat16", "int8"],
+                     monkeypatch=monkeypatch)
+    assert "float16" not in [c["alias"] for c in got]
+    assert "bfloat16" not in [c["alias"] for c in got]
+
+
+def test_the_cpu_trap_is_explained_when_the_full_list_is_asked_for(monkeypatch):
+    got = _precision("cpu", ["float32", "float16", "int8"], all_types=True,
+                     monkeypatch=monkeypatch)
+    trap = next(c for c in got if c["alias"] == "float16")
+    assert "float32" in trap["note"]
+
+
+def test_an_unsupported_type_is_never_offered(monkeypatch):
+    # A type that would silently fall back to another is not a choice.
+    got = _precision("cuda", ["float32", "int8"], all_types=True,
+                     monkeypatch=monkeypatch)
+    assert "float16" not in [c["alias"] for c in got]
+
+
+def test_a_device_supporting_neither_preferred_type_still_gets_choices(monkeypatch):
+    # Offering only "Automatic" would hide the setting rather than simplify it.
+    got = _precision("cuda", ["float32", "int8"], monkeypatch=monkeypatch)
+    assert [c["alias"] for c in got] == ["auto", "float32", "int8"]
+
+
+def test_automatic_is_always_first(monkeypatch):
+    for device, supported in (("cuda", ["float16"]), ("cpu", ["int8"]), ("cpu", [])):
+        got = _precision(device, supported, monkeypatch=monkeypatch)
+        assert got[0]["alias"] == "auto"
+
+
+def test_every_offered_precision_is_explained(monkeypatch):
+    got = _precision("cuda", ["float16", "int8_float16"], monkeypatch=monkeypatch)
+    for choice in got:
+        assert choice["label"] and choice["note"]
+
+
 def test_embedding_models_are_not_offered_for_summarizing():
     assert not models.is_language_model({"id": "nomic-embed-text-v1.5", "type": "embeddings"})
     assert not models.is_language_model({"id": "text-embedding-3-small", "type": ""})
