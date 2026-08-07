@@ -260,9 +260,9 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
     if cfg.llm.auto_context and cfg.llm.model:
         # A transcript that overruns the context window is silently truncated,
         # leaving the model no room to answer. Size the window to the input.
-        # Does nothing without the lms CLI, including no network call.
-        # A load that fails here raises: attempting the summary anyway only
-        # trades a precise reason for an opaque out-of-memory from the server.
+        # Unloads first, then loads once: a load fails rather than stepping
+        # down, because a smaller context that fits summarizes part of the
+        # meeting while presenting itself as all of it.
         needed = len(source) + len(cfg.llm.summary_prompt)
         with _model_log(path, cfg, source) as note:
             ok, detail = llm.fit_context(cfg, needed, log=note)
@@ -275,6 +275,14 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
             # as a summary that quietly covers less than the whole meeting.
             store.update_meta(path, warning=detail)
             meta["warning"] = detail
+    elif cfg.llm.model:
+        # Without auto_context nothing above runs, and the request then reaches
+        # a server that already has this model resident at some other context.
+        # LM Studio answers that by loading a second instance rather than
+        # reusing the first, which is two copies of the weights on one card.
+        cleared, detail = llm.unload_everything(cfg)
+        if progress:
+            progress(f"freed the GPU: {detail}")
 
     def ticker(stage: str):
         if not progress:

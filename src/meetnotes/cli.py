@@ -517,6 +517,9 @@ def cmd_unload(cfg, args) -> int:
     for instance in instances:
         print(f"  {instance['id']}  context {instance['context']}  "
               f"{int(instance['size_bytes'] / (1024 * 1024))} MB")
+        for key, value in sorted((instance.get("config") or {}).items()):
+            if key != "context_length":
+                print(f"      {key}: {value}")
     if not instances:
         print("  none reported")
 

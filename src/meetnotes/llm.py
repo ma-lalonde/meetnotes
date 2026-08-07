@@ -168,11 +168,16 @@ def rest_instances(cfg) -> list[dict]:
             found = []
             for entry in resp.json().get("models", []):
                 for instance in entry.get("loaded_instances") or []:
+                    config = instance.get("config") or {}
                     found.append({
                         "id": instance.get("id") or entry.get("key") or "",
                         "model": entry.get("key") or "",
-                        "context": (instance.get("config") or {}).get("context_length", 0) or 0,
+                        "context": config.get("context_length", 0) or 0,
                         "size_bytes": entry.get("size_bytes") or 0,
+                        # Whatever else the server reports. Concurrency in
+                        # particular multiplies the KV cache and is not
+                        # something meetnotes can set.
+                        "config": config,
                     })
             return found
     except (httpx.HTTPError, ValueError, AttributeError):
@@ -203,6 +208,11 @@ def rest_load(cfg, model: str, context: int) -> tuple[bool, int, str]:
     payload = {
         "model": model,
         "context_length": context,
+        # Documented as decreasing memory use and improving generation speed.
+        # The KV cache is what makes a long transcript expensive, so this is
+        # the one load option that reliably helps here.
+        "flash_attention": True,
+        "offload_kv_cache_to_gpu": cfg.llm.kv_cache_on_gpu,
         "echo_load_config": True,
     }
     try:
@@ -504,7 +514,13 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
     if not ok:
         raise LoadFailed(
             f"could not load {cfg.llm.model} with {wanted} tokens of context."
-            f"{vram_note()} {detail or 'no reason reported'}"
+            f"{vram_note()} {detail or 'no reason reported'}\n"
+            f"The weights are {weights or 'an unreported number of'} MB, so the "
+            f"rest is the KV cache. Two things multiply it, and neither can be "
+            f"set from here: Max Concurrent Predictions in LM Studio allocates "
+            f"the cache once per parallel slot, so 4 costs four times 1; and "
+            f"llm.kv_cache_on_gpu = false moves the cache to system RAM, which "
+            f"is slower but loads."
         )
     # Accepted is not the same as applied: the server may clamp the request.
     achieved = applied or _resident_context(cfg) or wanted

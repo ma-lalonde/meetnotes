@@ -483,6 +483,122 @@ def test_rest_is_used_before_the_cli(monkeypatch):
     assert asked["context"] == llm.required_context(60000)
 
 
+def test_the_same_model_at_a_different_context_is_unloaded_first(monkeypatch):
+    # The reported failure: qwen3.5-9b resident at 34186, meetnotes asks for a
+    # different size, and LM Studio answers by loading a second instance rather
+    # than replacing the first. Two copies of 6 GB of weights on an 8 GB card.
+    order = []
+    resident = [{"id": "qwen/qwen3.5-9b", "model": "qwen/qwen3.5-9b",
+                 "context": 34186, "size_bytes": 0, "config": {}}]
+
+    monkeypatch.setattr(llm, "catalog", lambda cfg: [
+        {"id": "qwen/qwen3.5-9b", "context": 131072},
+    ])
+    monkeypatch.setattr(llm, "rest_instances", lambda cfg: list(resident))
+    monkeypatch.setattr(llm, "lms_binary", lambda: "")
+    monkeypatch.setattr(llm, "loaded", lambda: [])
+    monkeypatch.setattr(llm, "model_size_mb", lambda cfg, m: 0)
+    monkeypatch.setattr(llm, "estimate_load", lambda m, c, g="max": (0, ""))
+    monkeypatch.setattr(llm, "free_vram_mb", lambda: 0)
+    monkeypatch.setattr(llm, "_resident_context", lambda cfg: 0)
+
+    def fake_unload(cfg, instance_id):
+        order.append(f"unload:{instance_id}")
+        resident.clear()
+        return True, "unloaded"
+
+    def fake_load(cfg, model, context):
+        order.append(f"load:{model}@{context}")
+        return True, context, "ok"
+
+    monkeypatch.setattr(llm, "rest_unload", fake_unload)
+    monkeypatch.setattr(llm, "rest_load", fake_load)
+
+    cfg = Config()
+    cfg.llm.model = "qwen/qwen3.5-9b"
+    ok, _ = llm.fit_context(cfg, 60000)
+    assert ok
+    assert order == [
+        "unload:qwen/qwen3.5-9b",
+        f"load:qwen/qwen3.5-9b@{llm.required_context(60000)}",
+    ]
+
+
+def test_flash_attention_is_requested_on_every_load(monkeypatch):
+    # Documented to decrease memory use, and the KV cache is what makes a long
+    # transcript expensive.
+    sent = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"load_config": {"context_length": sent["json"]["context_length"]}}
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, json=None, headers=None):
+            sent["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(llm.httpx, "Client", lambda **kw: FakeClient())
+    cfg = Config()
+    ok, applied, _ = llm.rest_load(cfg, "qwen3-8b", 20000)
+    assert ok and applied == 20000
+    assert sent["json"]["flash_attention"] is True
+    assert sent["json"]["offload_kv_cache_to_gpu"] is True
+    assert sent["json"]["echo_load_config"] is True
+
+
+def test_the_kv_cache_can_be_moved_off_the_gpu(monkeypatch):
+    sent = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"load_config": {"context_length": 20000}}
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, json=None, headers=None):
+            sent.update(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(llm.httpx, "Client", lambda **kw: FakeClient())
+    cfg = Config()
+    cfg.llm.kv_cache_on_gpu = False
+    llm.rest_load(cfg, "qwen3-8b", 20000)
+    assert sent["offload_kv_cache_to_gpu"] is False
+
+
+def test_a_failed_load_names_what_multiplies_the_cache(server, monkeypatch):
+    # Max Concurrent Predictions allocates the KV cache once per slot, and
+    # meetnotes cannot set it, so the message has to.
+    server(0)
+    monkeypatch.setattr(llm, "model_size_mb", lambda cfg, m: 6245)
+    monkeypatch.setattr(llm, "estimate_load", lambda m, c, g="max": (0, ""))
+    monkeypatch.setattr(llm, "free_vram_mb", lambda: 8064)
+    cfg = Config()
+    cfg.llm.model = "qwen/qwen3.5-9b"
+    with pytest.raises(llm.LoadFailed) as caught:
+        llm.fit_context(cfg, 60000)
+    message = str(caught.value)
+    assert "Max Concurrent Predictions" in message
+    assert "kv_cache_on_gpu" in message
+    assert "6245 MB" in message
+
+
 def test_the_weights_alone_are_checked_against_free_memory(server, monkeypatch):
     # size_bytes comes from the server, so this works with no lms CLI at all.
     server(131072, free=2000)

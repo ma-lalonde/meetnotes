@@ -93,6 +93,10 @@ class Llm:
     # this is what makes a model too big for the card loadable at all, at the
     # cost of speed.
     gpu_offload: str = "max"
+    # Keep the KV cache in VRAM. Turning this off moves it to system RAM, which
+    # is slower but is what makes a long transcript loadable on a card that the
+    # weights already nearly fill.
+    kv_cache_on_gpu: bool = True
     summary_prompt: str = prompts.SUMMARY
     actions_prompt: str = prompts.ACTIONS
     cleanup_prompt: str = prompts.CLEANUP
