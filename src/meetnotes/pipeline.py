@@ -130,6 +130,22 @@ def transcribe(path: Path, cfg, force: bool = False, progress=None) -> list[dict
     if not force and record.get("fingerprint") == fingerprint and meta.get("segments"):
         return meta["segments"]
 
+    # A speech model is about to be loaded, so the language model has to go
+    # first. Recording already does this, and summarizing does the reverse, but
+    # reprocessing an existing meeting starts here and was loading Whisper onto
+    # a card that still held the summarizer. Only now that a pass is certain:
+    # a cached result above returns without touching either model.
+    cleared, detail = llm.unload_everything(cfg)
+    if progress:
+        progress(f"freed the GPU for transcription: {detail}")
+    if not cleared and plan["device"] == "cuda":
+        raise llm.LlmError(
+            f"could not free the GPU before transcribing: {detail}.{llm.vram_note()} "
+            f"Loading a speech model on top of a language model is what runs the "
+            f"card out of memory. Unload it from LM Studio, or run "
+            f"`meetnotes unload` to see which step fails."
+        )
+
     segments = []
     for label, filename in meta.get("tracks", {}).items():
         track = path / "audio" / filename

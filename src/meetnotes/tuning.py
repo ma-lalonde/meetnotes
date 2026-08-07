@@ -139,6 +139,12 @@ def measure(sample: Path, cfg, log=None) -> list[Measurement]:
     device = "cuda" if hardware.cuda_runtime_ok() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
     free = speech_vram_mb() if device == "cuda" else 0
+    # Once, before any of them load: timing a speech model against a card that
+    # still holds the summarizer measures the wrong thing when it works and
+    # runs out of memory when it does not.
+    cleared, detail = llm.unload_everything(cfg)
+    if log:
+        log(f"freed the GPU before timing: {detail}")
     found = []
     for alias in candidates(device, free, compute_type, cfg):
         if log:

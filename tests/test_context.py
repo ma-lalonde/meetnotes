@@ -116,10 +116,11 @@ def loads(server):
     return lambda ceiling, entries=None: server(ceiling, entries)[0]
 
 
-def test_a_model_too_big_for_the_card_is_named_as_such(server):
-    # "failed to load model" is all LM Studio says. --estimate-only turns that
-    # into a number that can be compared against the card.
-    attempts, _ = server(0, cost=9200, free=7600)
+def test_a_model_too_big_for_the_card_is_named_as_such(server, monkeypatch):
+    # "failed to load model" is all LM Studio says. size_bytes turns that into
+    # a number that can be compared against the card, without running anything.
+    attempts, _ = server(0, free=7600)
+    monkeypatch.setattr(llm, "model_size_mb", lambda cfg, model: 9200)
     cfg = Config()
     cfg.llm.model = "qwen3-14b"
     with pytest.raises(llm.LoadFailed) as caught:
@@ -128,8 +129,25 @@ def test_a_model_too_big_for_the_card_is_named_as_such(server):
     assert "9200 MB" in message
     assert "7600 MB" in message
     assert "gpu_offload" in message
-    # Nothing was even attempted: the estimate ruled every size out first.
+    # Nothing was attempted: the weights alone ruled it out first.
     assert attempts == []
+
+
+def test_the_load_path_never_shells_out_to_lms_load(monkeypatch):
+    # `lms load <model> --estimate-only` is still `lms load` on a build that
+    # does not know the flag, which puts a copy of the model on the card
+    # between the unload and the load. Nothing automatic may run it.
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(llm.fit_context)))
+    called = {
+        node.func.id for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "estimate_load" not in called
+    assert "load_model" not in called  # the CLI load goes through _load only
 
 
 def test_a_failed_load_is_not_retried_smaller(server):

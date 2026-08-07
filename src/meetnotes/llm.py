@@ -490,26 +490,21 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
             f"whether another application is using the model."
         )
 
-    # Weights alone, from the server, so this works without the lms CLI. Then
-    # the CLI estimate if it is there, which also accounts for the KV cache.
+    # Weights alone, from the server's own size_bytes. Deliberately not
+    # estimate_load: that runs `lms load <model> --estimate-only`, and a build
+    # that does not know the flag runs `lms load <model>` instead, which loads
+    # the model. Putting a copy on the card between the unload and the load is
+    # exactly the failure this whole path exists to avoid, and the estimate it
+    # bought is no longer needed now that size_bytes is available over REST.
     weights = model_size_mb(cfg, cfg.llm.model)
+    if log:
+        log(f"{cfg.llm.model} weighs {weights or '?'} MB, {after or '?'} MB free")
     if weights and after and weights > after:
         raise LoadFailed(
             f"{cfg.llm.model} is {weights} MB and only {after} MB is free, before "
             f"any context is allocated.{vram_note()} Use a smaller quantization "
             f"or a smaller model, or set llm.gpu_offload below max so some layers "
             f"run on the CPU."
-        )
-    cost, note = estimate_load(cfg.llm.model, wanted, cfg.llm.gpu_offload)
-    if log and (cost or note):
-        log(f"{wanted} tokens: estimated {cost or '?'} MB, {after or '?'} MB free"
-            + (f", weights {weights} MB" if weights else ""))
-    if cost and after and cost > after:
-        raise LoadFailed(
-            f"{cfg.llm.model} needs about {cost} MB of VRAM at the {wanted} tokens "
-            f"this transcript requires, but only {after} MB is free.{vram_note()} "
-            f"Use a smaller quantization or a smaller model, or set "
-            f"llm.gpu_offload below max so some layers run on the CPU."
         )
 
     if log:

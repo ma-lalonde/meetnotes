@@ -300,6 +300,63 @@ def test_the_speech_model_is_always_released_before_summarizing(tmp_path, monkey
     assert "keep_asr_loaded" not in source
 
 
+def test_language_models_are_unloaded_before_transcribing(tmp_path, monkeypatch):
+    # Recording unloads, and summarizing unloads the other way, but
+    # reprocessing an existing meeting starts at transcription and was loading
+    # Whisper onto a card that still held the summarizer.
+    from meetnotes import asr, hardware, pipeline, store
+
+    order = []
+    monkeypatch.setattr(
+        llm, "unload_everything",
+        lambda cfg, log=None: (order.append("unload"), (True, "cleared"))[1],
+    )
+    monkeypatch.setattr(hardware, "plan", lambda cfg: {
+        "live_model": "base", "final_model": "large-v3-turbo",
+        "device": "cuda", "compute_type": "float16", "profile": "gpu",
+    })
+    monkeypatch.setattr(asr, "isolated", lambda cfg, plan: True)
+    monkeypatch.setattr(
+        asr, "transcribe_file_isolated",
+        lambda path, cfg, plan: (order.append("transcribe"), [])[1],
+    )
+
+    path = store.new_meeting(tmp_path, "demo")
+    (path / "audio").mkdir(exist_ok=True)
+    (path / "audio" / "Me.wav").write_bytes(b"RIFF")
+    store.update_meta(path, tracks={"Me": "Me.wav"})
+
+    pipeline.transcribe(path, Config())
+    assert order == ["unload", "transcribe"]
+
+
+def test_a_cached_transcript_does_not_disturb_the_gpu(tmp_path, monkeypatch):
+    # Nothing is about to be loaded, so nothing should be evicted.
+    from meetnotes import hardware, pipeline, store
+
+    touched = []
+    monkeypatch.setattr(
+        llm, "unload_everything",
+        lambda cfg, log=None: (touched.append("unload"), (True, ""))[1],
+    )
+    monkeypatch.setattr(hardware, "plan", lambda cfg: {
+        "live_model": "base", "final_model": "large-v3-turbo",
+        "device": "cuda", "compute_type": "float16", "profile": "gpu",
+    })
+    path = store.new_meeting(tmp_path, "demo")
+    cfg = Config()
+    meta = store.read_meta(path)
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "Me"}]
+    print_ = pipeline.artifacts.sha(
+        pipeline._audio_fingerprint(path, meta, hardware.plan(cfg), cfg),
+        cfg.asr.multilingual,
+    )
+    store.update_meta(path, segments=segments,
+                      artifacts={"segments": {"fingerprint": print_}})
+    assert pipeline.transcribe(path, cfg) == segments
+    assert touched == []
+
+
 def test_language_models_are_always_unloaded_before_recording():
     import inspect
 
