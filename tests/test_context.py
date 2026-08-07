@@ -155,16 +155,50 @@ def test_an_unknown_estimate_does_not_block_the_load(server):
     assert attempts == [llm.required_context(60000)]
 
 
-def test_a_model_still_resident_after_unload_is_reported(server, monkeypatch):
-    # "the model is not unloaded" was invisible: a zero exit from unload --all
-    # does not prove the memory came back.
-    server(131072)
+def test_a_model_that_will_not_unload_stops_the_load(server, monkeypatch):
+    # Loading on top of a model that refused to go is exactly the out-of-memory
+    # this is meant to prevent, and doing it anyway replaces a specific reason
+    # with a generic one.
+    attempts, _ = server(131072)
     monkeypatch.setattr(llm, "loaded", lambda: ["qwen3-8b  8.0 GB  loaded"])
-    lines = []
     cfg = Config()
     cfg.llm.model = "qwen3-8b"
-    llm.fit_context(cfg, 60000, log=lines.append)
-    assert any("STILL LOADED" in line for line in lines)
+    with pytest.raises(llm.LoadFailed) as caught:
+        llm.fit_context(cfg, 60000)
+    assert "could not free the GPU" in str(caught.value)
+    assert "qwen3-8b" in str(caught.value)
+    assert attempts == []
+
+
+def test_the_unload_is_verified_rather_than_assumed(server, monkeypatch):
+    # An accepted unload is not evidence that the memory came back.
+    server(131072)
+    calls = []
+    monkeypatch.setattr(llm, "loaded", lambda: calls.append("checked") or [])
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    llm.fit_context(cfg, 60000)
+    assert calls, "nothing asked whether the unload worked"
+
+
+def test_both_unload_routes_are_tried_not_just_one(monkeypatch):
+    # REST for a windowed app that never sees lms on PATH, the CLI for an
+    # LM Studio too old to have the endpoint.
+    done = []
+    monkeypatch.setattr(llm, "rest_instances", lambda cfg: [] if done else [
+        {"id": "qwen3-8b", "model": "qwen3-8b", "context": 4096, "size_bytes": 0},
+    ])
+    monkeypatch.setattr(
+        llm, "rest_unload",
+        lambda cfg, i: (done.append(f"rest:{i}"), (True, "unloaded"))[1],
+    )
+    monkeypatch.setattr(llm, "lms_binary", lambda: "/home/x/.lmstudio/bin/lms")
+    monkeypatch.setattr(llm, "unload", lambda model="": (done.append("cli"), (True, "ok"))[1])
+    monkeypatch.setattr(llm, "loaded", lambda: [])
+
+    cleared, detail = llm.unload_everything(Config())
+    assert cleared
+    assert done == ["rest:qwen3-8b", "cli"]
 
 
 def test_the_unload_records_what_the_card_actually_gave_back(server, monkeypatch):
@@ -447,6 +481,32 @@ def test_rest_is_used_before_the_cli(monkeypatch):
     ok, detail = llm.fit_context(cfg, 60000)
     assert ok
     assert asked["context"] == llm.required_context(60000)
+
+
+def test_the_weights_alone_are_checked_against_free_memory(server, monkeypatch):
+    # size_bytes comes from the server, so this works with no lms CLI at all.
+    server(131072, free=2000)
+    monkeypatch.setattr(llm, "model_size_mb", lambda cfg, model: 5200)
+    monkeypatch.setattr(llm, "estimate_load", lambda m, c, g="max": (0, ""))
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    with pytest.raises(llm.LoadFailed) as caught:
+        llm.fit_context(cfg, 60000)
+    message = str(caught.value)
+    assert "5200 MB" in message
+    assert "2000 MB" in message
+    assert "before any context" in message
+
+
+def test_weights_that_fit_do_not_block_the_load(server, monkeypatch):
+    attempts, _ = server(131072, free=8000)
+    monkeypatch.setattr(llm, "model_size_mb", lambda cfg, model: 5200)
+    monkeypatch.setattr(llm, "estimate_load", lambda m, c, g="max": (0, ""))
+    cfg = Config()
+    cfg.llm.model = "qwen3-8b"
+    ok, _ = llm.fit_context(cfg, 60000)
+    assert ok
+    assert attempts == [llm.required_context(60000)]
 
 
 def test_the_rest_url_sits_beside_the_openai_one():

@@ -179,16 +179,18 @@ def rest_instances(cfg) -> list[dict]:
         return []
 
 
-def rest_unload(cfg, instance_id: str) -> bool:
+def rest_unload(cfg, instance_id: str) -> tuple[bool, str]:
     try:
         with httpx.Client(timeout=60) as client:
             resp = client.post(
                 _v1(cfg, "models/unload"),
                 json={"instance_id": instance_id}, headers=_headers(cfg),
             )
-            return resp.status_code < 400
-    except httpx.HTTPError:
-        return False
+            if resp.status_code >= 400:
+                return False, f"{resp.status_code}: {_server_error(resp)}"
+            return True, "unloaded"
+    except httpx.HTTPError as exc:
+        return False, str(exc)
 
 
 def rest_load(cfg, model: str, context: int) -> tuple[bool, int, str]:
@@ -234,22 +236,43 @@ def unload(model: str = "") -> tuple[bool, str]:
     return True, (done.stdout or "unloaded").strip()[:200]
 
 
-def unload_everything(cfg) -> tuple[bool, str]:
-    """Evict every loaded instance, over REST where the server supports it.
+def unload_everything(cfg, log=None) -> tuple[bool, str]:
+    """Evict every loaded instance, and verify that it actually happened.
 
-    REST first because lms only reaches PATH when `lms bootstrap` has edited a
-    shell profile, which an application launched from a desktop entry never
-    reads. Falling back to the CLI keeps older LM Studio builds working.
+    Both routes are tried, not one or the other. REST first because lms only
+    reaches PATH when `lms bootstrap` has edited a shell profile, which an
+    application launched from a desktop entry never reads; the CLI after,
+    because an older LM Studio has no unload endpoint. Whichever ran, the
+    result is checked by asking again: an accepted unload is not evidence that
+    the memory came back, and proceeding on that assumption is how the load
+    that follows runs out of memory.
     """
+    def note(line):
+        if log:
+            log(line)
+
+    tried = []
     instances = rest_instances(cfg)
-    if instances:
-        done = [i["id"] for i in instances if rest_unload(cfg, i["id"])]
-        if done:
-            return True, f"unloaded {len(done)} instance(s): {', '.join(done[:4])}"
+    note(f"loaded instances before: {[i['id'] for i in instances] or 'none reported'}")
+
+    for instance in instances:
+        ok, detail = rest_unload(cfg, instance["id"])
+        tried.append(f"REST {instance['id']}: {'ok' if ok else detail}")
+        note(tried[-1])
+
     if lms_binary():
-        return unload()
-    # Nothing loaded is a success, not a failure.
-    return (not instances), "nothing was loaded" if not instances else "could not unload"
+        ok, detail = unload()
+        tried.append(f"lms unload --all: {detail}")
+        note(tried[-1])
+    elif not instances:
+        note("no REST instances and no lms CLI: nothing to act on")
+
+    # The only answer that counts.
+    left = rest_instances(cfg) or [{"id": line} for line in loaded() if line]
+    if left:
+        names = ", ".join(i["id"] for i in left[:4])
+        return False, f"still loaded after unloading: {names}. Tried: {'; '.join(tried) or 'nothing'}"
+    return True, "nothing is loaded" + (f" ({'; '.join(tried)})" if tried else "")
 
 
 def unload_all() -> tuple[bool, str]:
@@ -326,6 +349,26 @@ def free_vram_mb() -> int:
 
     gpus = hardware.nvidia()
     return gpus[0].get("free_mb", 0) if gpus else 0
+
+
+def model_size_mb(cfg, model: str) -> int:
+    """The model's own size on disk, from LM Studio. Zero if not reported.
+
+    Weights dominate what a load costs, and this is a real number rather than
+    an estimate, so it works without the lms CLI. It excludes the KV cache, so
+    it is a floor: if the weights alone do not fit, nothing else matters.
+    """
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(_v1(cfg, "models"), headers=_headers(cfg))
+            if resp.status_code != 200:
+                return 0
+            for entry in resp.json().get("models", []):
+                if entry.get("key") == model:
+                    return int((entry.get("size_bytes") or 0) / (1024 * 1024))
+    except (httpx.HTTPError, ValueError, AttributeError):
+        pass
+    return 0
 
 
 def load_model(model: str, context: int, gpu: str = "max") -> tuple[bool, str]:
@@ -419,21 +462,34 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
         )
 
     before = free_vram_mb()
-    freed, detail = unload_everything(cfg)
-    if log:
-        log(f"unload: {detail}" if freed else f"unload FAILED: {detail}")
-    # An accepted unload does not prove the memory came back. Say what actually
-    # changed, because "the model is not unloaded" is otherwise invisible here.
+    cleared, detail = unload_everything(cfg, log=log)
     after = free_vram_mb()
     if log and (before or after):
         log(f"free VRAM {before} MB before the unload, {after} MB after")
-    still = rest_instances(cfg) or [{"id": line} for line in loaded() if line]
-    if log and still:
-        log("STILL LOADED after unload: " + " | ".join(i["id"] for i in still[:6]))
+    if not cleared:
+        # Loading on top of a model that refused to go is precisely the
+        # out-of-memory this exists to prevent, and doing it anyway replaces a
+        # specific reason with a generic one.
+        raise LoadFailed(
+            f"could not free the GPU before loading {cfg.llm.model}: {detail}."
+            f"{vram_note()} Unload it from LM Studio's own interface, or check "
+            f"whether another application is using the model."
+        )
 
+    # Weights alone, from the server, so this works without the lms CLI. Then
+    # the CLI estimate if it is there, which also accounts for the KV cache.
+    weights = model_size_mb(cfg, cfg.llm.model)
+    if weights and after and weights > after:
+        raise LoadFailed(
+            f"{cfg.llm.model} is {weights} MB and only {after} MB is free, before "
+            f"any context is allocated.{vram_note()} Use a smaller quantization "
+            f"or a smaller model, or set llm.gpu_offload below max so some layers "
+            f"run on the CPU."
+        )
     cost, note = estimate_load(cfg.llm.model, wanted, cfg.llm.gpu_offload)
     if log and (cost or note):
-        log(f"{wanted} tokens: estimated {cost or '?'} MB, {after or '?'} MB free")
+        log(f"{wanted} tokens: estimated {cost or '?'} MB, {after or '?'} MB free"
+            + (f", weights {weights} MB" if weights else ""))
     if cost and after and cost > after:
         raise LoadFailed(
             f"{cfg.llm.model} needs about {cost} MB of VRAM at the {wanted} tokens "

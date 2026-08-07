@@ -486,6 +486,58 @@ def cmd_llm_check(cfg, args) -> int:
     return 0
 
 
+def cmd_unload(cfg, args) -> int:
+    """Try every route to free the GPU, and report what each one did."""
+    import json as jsonlib
+
+    import httpx
+
+    from . import llm
+
+    base = cfg.llm.base_url.rstrip("/")
+    print(f"base url   {base}")
+    print(f"lms CLI    {llm.lms_binary() or 'NOT FOUND'}")
+
+    for label, url in (
+        ("/api/v1/models", llm._v1(cfg, "models")),
+        ("/api/v0/models", base[: -len('/v1')] + "/api/v0/models"
+         if base.endswith("/v1") else base + "/models"),
+    ):
+        try:
+            with httpx.Client(timeout=10) as client:
+                resp = client.get(url, headers={"Authorization": f"Bearer {cfg.llm.api_key or 'none'}"})
+            print(f"\n{label}  ->  HTTP {resp.status_code}")
+            if resp.status_code == 200 and args.full:
+                print(jsonlib.dumps(resp.json(), indent=2)[:1500])
+        except httpx.HTTPError as exc:
+            print(f"\n{label}  ->  FAILED: {exc}")
+
+    print("\nloaded instances seen over REST:")
+    instances = llm.rest_instances(cfg)
+    for instance in instances:
+        print(f"  {instance['id']}  context {instance['context']}  "
+              f"{int(instance['size_bytes'] / (1024 * 1024))} MB")
+    if not instances:
+        print("  none reported")
+
+    for line in llm.loaded()[:12]:
+        print(f"  lms ps   {line}")
+
+    before = llm.free_vram_mb()
+    print(f"\nfree VRAM before  {before} MB")
+    cleared, detail = llm.unload_everything(cfg, log=lambda line: print(f"  {line}"))
+    print(f"\nresult     {'cleared' if cleared else 'NOT CLEARED'}")
+    print(f"           {detail}")
+    print(f"free VRAM after   {llm.free_vram_mb()} MB")
+
+    procs = hardware.gpu_processes()
+    if procs:
+        print("\nstill holding VRAM:")
+        for proc in procs:
+            print(f"  {proc['used_mb']:>6} MB  {proc['name']} (pid {proc['pid']})")
+    return 0 if cleared else 1
+
+
 def cmd_tune(cfg, args) -> int:
     """Measure what this machine can actually run, and optionally keep it."""
     import tempfile
@@ -740,6 +792,9 @@ def main(argv=None) -> int:
     proc.add_argument("--force", action="store_true", help="ignore fingerprints and overwrite")
     proc.add_argument("--no-llm", action="store_true", help="transcripts only")
 
+    unl = subs.add_parser("unload", help="free the GPU, showing every step")
+    unl.add_argument("--full", action="store_true", help="print the raw server responses")
+
     tune = subs.add_parser("tune", help="measure this machine and choose models")
     tune.add_argument("--sample", help="a recording to time the speech models on")
     tune.add_argument(
@@ -774,6 +829,7 @@ def main(argv=None) -> int:
         "sources": cmd_sources,
         "record": cmd_record,
         "process": cmd_process,
+        "unload": cmd_unload,
         "tune": cmd_tune,
         "list": cmd_list,
         "recover": cmd_recover,
