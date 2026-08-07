@@ -48,7 +48,7 @@ WHISPER_MODELS = {
     "tiny": ("Tiny", 39, 1, "lowest accuracy, runs anywhere"),
     "base": ("Base", 74, 2, "low accuracy"),
     "small": ("Small", 244, 3, "fast enough for live on CPU"),
-    "medium": ("Medium", 769, 4, "middle ground"),
+    "medium": ("Medium", 769, 4, "superseded by Turbo, which is 5% larger"),
     "large-v3-turbo": ("Turbo", 809, 5, "large-v2 quality at half the size"),
     "large-v2": ("Large v2", 1550, 5, "superseded by Turbo"),
     "large-v3": ("Large v3", 1550, 6, "most accurate, slowest"),
@@ -64,7 +64,7 @@ WHISPER_MODELS = {
     "tiny.en": ("Tiny EN", 39, 1, "lowest accuracy, runs anywhere"),
     "base.en": ("Base EN", 74, 2, "low accuracy"),
     "small.en": ("Small EN", 244, 3, "fast enough for live on CPU"),
-    "medium.en": ("Medium EN", 769, 4, "middle ground"),
+    "medium.en": ("Medium EN", 769, 4, "superseded by Distil v3.5, which is smaller"),
     "distil-large-v3": ("Distil v3 EN", 756, 5, "superseded by Distil v3.5"),
     "distil-large-v3.5": ("Distil v3.5 EN", 756, 6, "very fast"),
 }
@@ -85,12 +85,21 @@ ENGLISH_TWIN = {
 }
 
 
-def dominated(alias: str, others) -> bool:
-    """True when another model is no larger and no less accurate.
+# How much larger a model may be and still count as displacing a smaller one.
+# Strict domination misses the case that matters most in practice: Turbo is 809
+# M against Medium's 769 M, five percent more, for a jump from Medium quality to
+# large-v2 quality. Being marginally smaller is not a reason to pick a
+# materially worse model, so a rival within this margin still displaces it.
+SIZE_TOLERANCE = 0.10
 
-    Large v2 against Turbo is the case that matters: same accuracy, twice the
-    size, so nothing chooses it on purpose. Computed rather than hand-listed so
-    adding a model cannot leave a stale recommendation behind.
+
+def dominated(alias: str, others) -> bool:
+    """True when another model is better and not meaningfully larger.
+
+    Large v2 against Turbo is the exact case: same accuracy, twice the size, so
+    nothing chooses it on purpose. Medium against Turbo is the near case, which
+    the tolerance covers. Computed rather than hand-listed so adding a model
+    cannot leave a stale recommendation behind.
     """
     entry = WHISPER_MODELS.get(alias)
     if not entry:
@@ -104,9 +113,12 @@ def dominated(alias: str, others) -> bool:
         if not rival:
             continue
         _, rival_size, rival_rank, _ = rival
-        if rival_size <= size and rival_rank >= rank and (
-            rival_size < size or rival_rank > rank
-        ):
+        if rival_rank < rank:
+            continue
+        # Same accuracy only displaces at no extra cost; better accuracy
+        # displaces if the extra size is within the margin.
+        budget = size * (1 + SIZE_TOLERANCE) if rival_rank > rank else size
+        if rival_size <= budget and (rival_size < size or rival_rank > rank):
             return True
     return False
 

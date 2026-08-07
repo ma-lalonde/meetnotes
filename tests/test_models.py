@@ -76,6 +76,47 @@ def test_the_frontier_is_computed_not_listed():
     assert not models.dominated("large-v3", list(models.WHISPER_MODELS))
 
 
+def test_a_marginally_smaller_but_worse_model_is_dropped():
+    # Turbo is 809 M against Medium's 769 M, five percent more, for a jump from
+    # Medium quality to large-v2 quality. Being slightly smaller is not a
+    # reason to pick it.
+    assert models.dominated("medium", ["medium", "large-v3-turbo"])
+    assert "medium" not in {c["alias"] for c in models.whisper_choices()}
+
+
+def test_the_size_tolerance_does_not_cascade():
+    # Every model that survives must be separated from the next one up by more
+    # than the tolerance, or the frontier would keep eating itself.
+    offered = [c for c in models.whisper_choices()
+               if c["alias"] not in models.ENGLISH_ONLY]
+    by_size = sorted(offered, key=lambda c: c["params_m"])
+    for smaller, larger in zip(by_size, by_size[1:]):
+        ratio = larger["params_m"] / smaller["params_m"]
+        assert ratio > 1 + models.SIZE_TOLERANCE, (
+            f"{smaller['label']} and {larger['label']} are within the tolerance"
+        )
+
+
+def test_equal_accuracy_only_displaces_at_no_extra_cost():
+    # The tolerance is for a genuine accuracy gain. A model that is no better
+    # must be strictly smaller to displace another, or two equal-quality models
+    # a few percent apart would knock each other out.
+    same = dict(models.WHISPER_MODELS)
+    same["fake-a"] = ("Fake A", 1000, 5, "")
+    same["fake-b"] = ("Fake B", 1050, 5, "")
+    original, models.WHISPER_MODELS = models.WHISPER_MODELS, same
+    try:
+        assert not models.dominated("fake-a", ["fake-a", "fake-b"])
+        assert models.dominated("fake-b", ["fake-a", "fake-b"])
+    finally:
+        models.WHISPER_MODELS = original
+
+
+def test_the_most_accurate_model_is_never_dropped():
+    offered = {c["alias"] for c in models.whisper_choices()}
+    assert "large-v3" in offered
+
+
 def test_english_and_multilingual_are_ranked_separately():
     # A small English-only model is not "better than" a multilingual one; they
     # do different jobs, so neither can dominate the other.

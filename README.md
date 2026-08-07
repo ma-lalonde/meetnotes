@@ -211,12 +211,21 @@ depends on the machine and not on any published number. Language models are
 cost without loading it. The Models tab has the same thing as **Choose for this
 machine**.
 
-**Only models worth choosing are offered.** A model that is both larger and no
-more accurate than another has no reason to be picked, so it is dropped:
-`large-v2` is Turbo's quality at twice the size, and `distil-large-v3` is
-superseded by `v3.5`. The frontier is computed from size and accuracy rank
-rather than hand-listed, so adding a model cannot leave a stale recommendation
-behind.
+**Only models worth choosing are offered.** A model another one beats without
+costing meaningfully more has no reason to be picked, so it is dropped:
+
+| Dropped | Why |
+| --- | --- |
+| `large-v2` | Turbo's quality at twice the size |
+| `medium` | Turbo is 5% larger and a whole tier better |
+| `medium.en` | `distil-large-v3.5` is smaller and better |
+| `distil-large-v3` | superseded by `v3.5` |
+
+Equal accuracy only displaces at strictly lower cost; a genuine accuracy gain
+displaces within a 10% size margin. The frontier is computed from size and
+accuracy rank rather than hand-listed, so adding a model cannot leave a stale
+recommendation behind, and a test asserts the surviving models stay more than
+that margin apart so the rule cannot cascade.
 
 **The list follows the language setting.** English-only (`.en`) models have the
 same parameter count as the multilingual models they were cut from and are
