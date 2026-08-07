@@ -97,6 +97,10 @@ class Llm:
     # is slower but is what makes a long transcript loadable on a card that the
     # weights already nearly fill.
     kv_cache_on_gpu: bool = True
+    # Tokens kept aside for the answer, on top of the transcript. A reasoning
+    # model spends most of this thinking before it writes anything, so raise it
+    # if summaries stop mid-sentence.
+    answer_reserve: int = 4096
     summary_prompt: str = prompts.SUMMARY
     actions_prompt: str = prompts.ACTIONS
     cleanup_prompt: str = prompts.CLEANUP

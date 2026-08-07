@@ -302,7 +302,10 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
         progress("summarizing", stage_fraction("writing transcripts"))
     report["summary.md"] = artifacts.ensure(
         path, meta, "summary.md",
-        artifacts.sha(source, cfg.llm.summary_prompt, cfg.llm.model),
+        # The reserve is an input: raising it after a truncated answer has to
+        # invalidate the artifact, or re-running would report it as fresh.
+        artifacts.sha(source, cfg.llm.summary_prompt, cfg.llm.model,
+                      cfg.llm.answer_reserve),
         lambda: llm.chat(
             cfg, cfg.llm.summary_prompt, source, on_token=ticker("summarizing")
         ) + "\n",
@@ -312,7 +315,8 @@ def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progres
     if progress:
         progress("extracting actions", stage_fraction("summarizing"))
     actions_print = artifacts.sha(
-        source, cfg.llm.actions_prompt, cfg.llm.model, prompts.ACTIONS_SCHEMA_VERSION
+        source, cfg.llm.actions_prompt, cfg.llm.model,
+        prompts.ACTIONS_SCHEMA_VERSION, cfg.llm.answer_reserve,
     )
     report["actions.json"] = artifacts.ensure(
         path, meta, "actions.json", actions_print,

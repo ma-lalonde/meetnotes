@@ -31,6 +31,10 @@ class LoadFailed(LlmError):
     """The model could not be loaded at any context size."""
 
 
+class Truncated(LlmError):
+    """The answer stopped because it ran out of room, not because it ended."""
+
+
 class ContextTooSmall(LlmError):
     """The largest context that loads cannot hold this transcript.
 
@@ -442,7 +446,7 @@ def fit_context(cfg, prompt_chars: int, log=None) -> tuple[bool, str]:
     presented as a summary of all of it, and the server truncates silently.
     Failing here leaves the transcripts intact and says what to change.
     """
-    needed = required_context(prompt_chars)
+    needed = required_context(prompt_chars, cfg.llm.answer_reserve or ANSWER_RESERVE)
     try:
         entries = catalog(cfg)
     except LlmError as exc:
@@ -603,15 +607,23 @@ def list_models(cfg) -> list[str]:
         raise LlmError(f"cannot reach {url}: {exc}") from exc
 
 
-def _stream(cfg, url: str, payload: dict, on_token) -> str:
-    """Server-sent events from an OpenAI-compatible endpoint.
+def _stream(cfg, url: str, payload: dict, on_token) -> tuple[str, str, int]:
+    """Server-sent events. Returns (text, finish_reason, reasoning tokens).
 
     A single blocking request reports nothing until it finishes, which for a
     long summary looks indistinguishable from a hang. Streaming gives a token
     count to show instead.
+
+    finish_reason matters as much as the text: "length" means the answer was
+    cut off mid-sentence, and a truncated summary saved as a complete one is
+    worse than no summary. Reasoning tokens are counted but never appended,
+    because they are the model's scratchpad; counting them is what makes a
+    reasoning model's long silence legible rather than looking like a stall.
     """
     payload = {**payload, "stream": True}
     pieces = []
+    thinking = 0
+    finish = ""
     with httpx.Client(timeout=cfg.llm.timeout) as client:
         with client.stream("POST", url, json=payload, headers=_headers(cfg)) as resp:
             if resp.status_code >= 400:
@@ -632,14 +644,22 @@ def _stream(cfg, url: str, payload: dict, on_token) -> str:
                     continue
                 choices = chunk.get("choices") or [{}]
                 delta = choices[0].get("delta") or {}
+                message = choices[0].get("message") or {}
+                finish = choices[0].get("finish_reason") or finish
                 # Some servers only populate message on the final chunk, and
                 # reasoning models put their scratchpad in a separate field
                 # that must not end up in the summary.
-                piece = delta.get("content") or (choices[0].get("message") or {}).get("content")
+                piece = delta.get("content") or message.get("content")
                 if piece:
                     pieces.append(piece)
-                    on_token(len(pieces))
-    return "".join(pieces)
+                    on_token(len(pieces) + thinking)
+                    continue
+                for key in ("reasoning_content", "reasoning"):
+                    if delta.get(key) or message.get(key):
+                        thinking += 1
+                        on_token(len(pieces) + thinking)
+                        break
+    return "".join(pieces), finish, thinking
 
 
 def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: str = "result",
@@ -666,16 +686,20 @@ def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: s
     if cfg.llm.ttl_seconds > 0:
         payload["ttl"] = cfg.llm.ttl_seconds
 
+    finish = ""
+    thinking = 0
     try:
         if on_token is not None:
-            content = _stream(cfg, url, payload, on_token)
+            content, finish, thinking = _stream(cfg, url, payload, on_token)
             if not (content or "").strip():
                 # A stream that yielded nothing must not become an empty file.
                 # Fall back to a plain request before giving up.
                 with httpx.Client(timeout=cfg.llm.timeout) as client:
                     resp = client.post(url, json=payload, headers=_headers(cfg))
                     resp.raise_for_status()
-                    content = resp.json()["choices"][0]["message"]["content"]
+                    choice = resp.json()["choices"][0]
+                    content = choice["message"]["content"]
+                    finish = choice.get("finish_reason") or finish
         else:
             with httpx.Client(timeout=cfg.llm.timeout) as client:
                 resp = client.post(url, json=payload, headers=_headers(cfg))
@@ -686,9 +710,27 @@ def chat(cfg, system: str, user: str, schema: dict | None = None, schema_name: s
                     raise LlmError(
                         f"{resp.status_code} from {url}: {_server_error(resp)}"
                     )
-                content = resp.json()["choices"][0]["message"]["content"]
+                choice = resp.json()["choices"][0]
+                content = choice["message"]["content"]
+                finish = choice.get("finish_reason") or ""
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
         raise LlmError(f"{cfg.llm.model} at {url}: {exc}") from exc
+
+    if finish == "length":
+        # The answer stopped because it ran out of room, not because it was
+        # finished. Saving it would put a summary that ends mid-sentence in the
+        # meeting folder with nothing to say it is incomplete.
+        spent = f", after {thinking} tokens of reasoning" if thinking else ""
+        raise Truncated(
+            f"{cfg.llm.model} ran out of context before finishing its answer"
+            f"{spent}. It wrote {len(content)} characters and stopped mid-way.\n"
+            f"The window has to hold the transcript and the whole answer. A "
+            f"reasoning model spends most of it thinking before writing a word, "
+            f"so raise llm.answer_reserve (currently "
+            f"{cfg.llm.answer_reserve or ANSWER_RESERVE}) and run it again, or "
+            f"pick a model that does not reason. Raising llm.max_context does "
+            f"nothing: that is a cap, not a target."
+        )
 
     content = (content or "").strip()
     if not content:

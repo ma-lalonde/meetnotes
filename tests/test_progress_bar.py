@@ -206,6 +206,81 @@ def test_streaming_ignores_malformed_chunks(monkeypatch):
     assert llm.chat(cfg, "system", "user", on_token=lambda n: None) == "ok"
 
 
+def _sse_chunks(chunks):
+    return ("\n".join("data: " + json.dumps(c) for c in chunks)
+            + "\ndata: [DONE]").encode()
+
+
+def _serve(monkeypatch, body):
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(
+            lambda request: httpx.Response(200, content=body)
+        )}),
+    )
+
+
+def test_an_answer_cut_off_by_the_token_limit_is_refused(monkeypatch):
+    # finish_reason "length" means it stopped because it ran out of room, not
+    # because it was done. Saving that puts a summary ending mid-sentence in
+    # the meeting folder with nothing to say it is incomplete.
+    _serve(monkeypatch, _sse_chunks([
+        {"choices": [{"delta": {"content": "Key points: the team agreed to"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+    ]))
+    cfg = Config()
+    cfg.llm.model = "qwen3-9b"
+    with pytest.raises(llm.Truncated) as caught:
+        llm.chat(cfg, "system", "user", on_token=lambda n: None)
+    assert "ran out of context" in str(caught.value)
+    assert "answer_reserve" in str(caught.value)
+
+
+def test_a_complete_answer_is_not_refused(monkeypatch):
+    _serve(monkeypatch, _sse_chunks([
+        {"choices": [{"delta": {"content": "All done."}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ]))
+    cfg = Config()
+    cfg.llm.model = "qwen3-9b"
+    assert llm.chat(cfg, "s", "u", on_token=lambda n: None) == "All done."
+
+
+def test_reasoning_tokens_are_counted_but_never_written(monkeypatch):
+    # A reasoning model is silent for a long time before it writes anything.
+    # Counting the scratchpad is what makes that legible instead of a stall,
+    # and it must not reach the summary.
+    _serve(monkeypatch, _sse_chunks([
+        {"choices": [{"delta": {"reasoning_content": "let me think"}}]},
+        {"choices": [{"delta": {"reasoning_content": "still thinking"}}]},
+        {"choices": [{"delta": {"content": "The answer."}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ]))
+    counts = []
+    cfg = Config()
+    cfg.llm.model = "qwen3-9b"
+    text = llm.chat(cfg, "s", "u", on_token=counts.append)
+    assert text == "The answer."
+    assert "think" not in text
+    # Progress moved during the silence rather than sitting at zero.
+    assert counts == [1, 2, 3]
+
+
+def test_a_truncation_after_reasoning_says_how_much_was_spent(monkeypatch):
+    _serve(monkeypatch, _sse_chunks([
+        {"choices": [{"delta": {"reasoning_content": "a"}}]},
+        {"choices": [{"delta": {"reasoning_content": "b"}}]},
+        {"choices": [{"delta": {"content": "Partial"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+    ]))
+    cfg = Config()
+    cfg.llm.model = "qwen3-9b"
+    with pytest.raises(llm.Truncated) as caught:
+        llm.chat(cfg, "s", "u", on_token=lambda n: None)
+    assert "2 tokens of reasoning" in str(caught.value)
+
+
 OOM = "Failed to load model: not enough VRAM to allocate the KV cache"
 
 
