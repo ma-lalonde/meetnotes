@@ -21,9 +21,9 @@ import threading
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QTableWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -182,6 +182,10 @@ class RecordScreen(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Qt only delivers this when the widget is becoming visible, so it is
+        # the signal itself. Testing isVisible() here answered False during the
+        # first show, which left the meters never started until a tab change
+        # sent a second showEvent.
         self.start_meters()
 
     def hideEvent(self, event):
@@ -195,8 +199,6 @@ class RecordScreen(QWidget):
         a second capture stream, so nothing extra touches the devices.
         """
         self.stop_meters()
-        if not self.isVisible():
-            return
         work = Path(tempfile.mkdtemp(prefix="meetnotes-levels-"))
 
         if self.session.recording and self.session.recorder is not None:
@@ -768,6 +770,12 @@ class ModelsScreen(QWidget):
         save.clicked.connect(self.save)
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.reload)
+        auto = QPushButton("Choose for this machine")
+        auto.setToolTip(
+            "Measure free VRAM and ask LM Studio what each model would cost, "
+            "then pick the largest that fits with a usable context."
+        )
+        auto.clicked.connect(self.autotune)
         gguf = QPushButton("Why not the GGUF whisper models?")
         gguf.clicked.connect(
             lambda: QMessageBox.information(self, "GGUF speech models", models.gguf_note())
@@ -775,6 +783,7 @@ class ModelsScreen(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(save)
         buttons.addWidget(refresh)
+        buttons.addWidget(auto)
         buttons.addWidget(gguf)
         buttons.addStretch()
         self.status = QLabel("")
@@ -802,8 +811,19 @@ class ModelsScreen(QWidget):
         if allow_skip:
             combo.addItem("Skip the final pass, keep the live transcript", "")
         for choice in models.whisper_choices():
-            combo.addItem(f"{choice['repo']}  -  {choice['note']}", choice["alias"])
+            size = f"{choice['params_m']} M" if choice["params_m"] else ""
+            note = f"  -  {choice['note']}" if choice["note"] else ""
+            combo.addItem(f"{choice['label']}   {size}{note}", choice["alias"])
+            # The repository is what actually gets downloaded, so it stays
+            # reachable without cluttering the line.
+            combo.setItemData(combo.count() - 1, choice["repo"], Qt.ToolTipRole)
         index = combo.findData(current)
+        if index < 0 and current:
+            # A model chosen before, or hand-edited into the config, that the
+            # curated list no longer offers. Keep it rather than silently
+            # switching what runs.
+            combo.addItem(f"{models.label(current)}   (not in the short list)", current)
+            index = combo.count() - 1
         combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
 
@@ -885,6 +905,49 @@ class ModelsScreen(QWidget):
     def unload_now(self):
         freed, detail = llm.unload_all()
         self.status.setText(detail if freed else f"could not unload: {detail}")
+
+    def autotune(self):
+        """Size the models to what this machine has free, and say what changed.
+
+        No sample recording here, so speech models are sized rather than timed;
+        `meetnotes tune --record 30` does the measured version. The part that
+        matters in the UI is the language model, where free VRAM decides
+        whether a usable context is available at all.
+        """
+        from . import tuning
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            plan = tuning.tune(self.cfg)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not measure this machine", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        lines = [
+            f"Live speech model:  {models.label(plan.live)}",
+            f"Final speech model: {models.label(plan.final)}",
+            f"Device:             {plan.device} ({plan.compute_type})",
+        ]
+        if plan.summary_model:
+            lines.append(
+                f"Summary model:      {plan.summary_model}"
+                f" at {plan.summary_context} tokens of context"
+            )
+        else:
+            lines.append("Summary model:      could not be chosen")
+        lines += [f"\n{note}" for note in plan.notes]
+
+        answer = QMessageBox.question(
+            self, "Chosen for this machine", "\n".join(lines) + "\n\nApply these?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        tuning.apply(plan, self.cfg)
+        self.reload()
+        self.status.setText("Models chosen for this machine and saved.")
 
     def save(self):
         cfg = self.cfg

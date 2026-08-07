@@ -48,8 +48,51 @@ def test_bare_aliases_are_not_offered_twice():
 
 def test_english_only_models_are_marked():
     for choice in models.whisper_choices():
-        if choice["alias"].endswith(".en") or choice["alias"].startswith("distil-"):
-            assert "ENGLISH ONLY" in choice["note"] or choice["note"] == ""
+        if choice["alias"] in models.ENGLISH_ONLY:
+            assert choice["label"].endswith(" EN")
+        else:
+            assert not choice["label"].endswith(" EN")
+
+
+def test_a_larger_model_that_is_no_better_is_not_offered():
+    # Turbo is large-v2 quality at half the size, so nothing picks large-v2 on
+    # purpose. This is the case the frontier exists for.
+    offered = {choice["alias"] for choice in models.whisper_choices()}
+    assert "large-v3-turbo" in offered
+    assert "large-v2" not in offered
+    assert "large-v3" in offered  # genuinely more accurate, so it stays
+
+
+def test_distil_v3_is_dropped_for_v3_5():
+    offered = {choice["alias"] for choice in models.whisper_choices()}
+    assert "distil-large-v3" not in offered
+    assert "distil-large-v3.5" in offered
+
+
+def test_the_frontier_is_computed_not_listed():
+    # A hand-maintained list goes stale the moment a model is added.
+    assert models.dominated("large-v2", ["large-v2", "large-v3-turbo"])
+    assert not models.dominated("large-v2", ["large-v2"])
+    assert not models.dominated("large-v3", list(models.WHISPER_MODELS))
+
+
+def test_english_and_multilingual_are_ranked_separately():
+    # A small English-only model is not "better than" a multilingual one; they
+    # do different jobs, so neither can dominate the other.
+    assert not models.dominated("small", ["small", "distil-large-v3.5"])
+    assert not models.dominated("tiny.en", ["tiny.en", "tiny"])
+
+
+def test_every_offered_model_keeps_a_real_size():
+    for choice in models.whisper_choices():
+        assert choice["params_m"] > 0
+
+
+def test_the_full_list_still_reaches_everything_installed():
+    curated = {choice["alias"] for choice in models.whisper_choices()}
+    everything = {choice["alias"] for choice in models.whisper_choices(all_models=True)}
+    assert curated < everything
+    assert "large-v2" in everything
 
 
 def test_compute_types_are_reported_for_cpu():

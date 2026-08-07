@@ -187,10 +187,37 @@ recorded before this layout are moved on the next run, hand edits included.
 rule set, never from a language model. The verbatim transcript has to stay
 trustworthy. An LLM rewrite is available per meeting, never automatic.
 
-**GPU memory.** The speech model is unloaded before the language model is
-called, language models are unloaded before recording starts (`lms unload --all`),
-and requests carry a `ttl` so LM Studio drops the model when idle. At most one
-model is resident at a time.
+**GPU memory.** Speech recognition runs in a child process, because CTranslate2
+allocates through a caching allocator that never returns VRAM to the driver
+while the process lives; its exit is the only release. Language models are
+unloaded before a load and before recording starts (`lms unload --all`), and
+requests carry a `ttl` so LM Studio drops the model when idle. At most one model
+is resident at a time.
+
+**Choosing models.** Free VRAM decides more than it should: freeing a gigabyte
+by switching NVIDIA PRIME to on-demand can be the difference between a 4k
+context and a usable one. Rather than leave that to be discovered as `failed to
+load model`:
+
+```
+meetnotes tune                # size models against free VRAM
+meetnotes tune --record 30    # record a sample and time each model on it
+meetnotes tune --apply        # keep the result
+```
+
+Speech models are **timed**, because whether one keeps up with live speech
+depends on the machine and not on any published number. Language models are
+**estimated**, via `lms load --estimate-only`, which reports what a load would
+cost without loading it. The Models tab has the same thing as **Choose for this
+machine**.
+
+**Only models worth choosing are offered.** A model that is both larger and no
+more accurate than another has no reason to be picked, so it is dropped:
+`large-v2` is Turbo's quality at twice the size, and `distil-large-v3` is
+superseded by `v3.5`. The frontier is computed from size and accuracy rank
+rather than hand-listed, so adding a model cannot leave a stale recommendation
+behind. English-only and multilingual models are ranked separately, since
+neither can substitute for the other.
 
 **Why not the 500 MB GGUF whisper builds.** CTranslate2, the engine behind
 faster-whisper, converts from Fairseq, Marian, OpenNMT and Transformers into its

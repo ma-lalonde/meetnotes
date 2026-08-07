@@ -486,6 +486,73 @@ def cmd_llm_check(cfg, args) -> int:
     return 0
 
 
+def cmd_tune(cfg, args) -> int:
+    """Measure what this machine can actually run, and optionally keep it."""
+    import tempfile
+
+    from . import models, tuning
+
+    sample = Path(args.sample).expanduser() if args.sample else None
+    if args.record:
+        source = audio.resolve(cfg.capture.mic_source, "mic")
+        if source is None:
+            print("No microphone selected. Run: meetnotes sources --auto")
+            return 1
+        work = Path(tempfile.mkdtemp(prefix="meetnotes-tune-"))
+        sample = work / "sample.wav"
+        print(f"Recording {args.record:.0f}s from {source.label}. Speak normally.")
+        recorder = audio.Recorder(
+            cfg.capture.record_cmd, cfg.capture.sample_rate, {"sample": source}, work
+        )
+        recorder.start()
+        time.sleep(args.record)
+        recorder.stop()
+        sample = recorder.paths["sample"]
+        print(f"Sample written to {sample}\n")
+
+    if sample and not sample.exists():
+        print(f"No such sample: {sample}")
+        return 1
+    if not sample:
+        print(
+            "No sample given, so speech models are sized rather than timed.\n"
+            "For a real measurement: meetnotes tune --record 30\n"
+        )
+
+    plan = tuning.tune(cfg, sample, log=lambda line: print(f"  {line}"))
+
+    print()
+    if plan.measurements:
+        print("speech models, timed on this machine:")
+        for found in plan.measurements:
+            if found.error:
+                print(f"  {found.label:<12} FAILED  {found.error[:70]}")
+                continue
+            verdict = "keeps up live" if found.keeps_up else "final pass only"
+            print(
+                f"  {found.label:<12} {found.realtime:>6.2f}x realtime  "
+                f"~{found.vram_mb} MB  {verdict}"
+            )
+        print()
+
+    print(f"live model     {models.label(plan.live)} ({plan.live})")
+    print(f"final model    {models.label(plan.final)} ({plan.final})")
+    print(f"device         {plan.device} ({plan.compute_type})")
+    if plan.summary_model:
+        print(f"summary model  {plan.summary_model} at {plan.summary_context} tokens")
+    else:
+        print("summary model  not chosen")
+    for note in plan.notes:
+        print(f"  note: {note}")
+
+    if args.apply:
+        tuning.apply(plan, cfg)
+        print(f"\nSaved to {CONFIG_PATH}")
+    else:
+        print("\nRe-run with --apply to keep this.")
+    return 0
+
+
 def cmd_vocabulary(cfg, args) -> int:
     terms = list(cfg.asr.vocabulary)
     if args.clear:
@@ -673,6 +740,18 @@ def main(argv=None) -> int:
     proc.add_argument("--force", action="store_true", help="ignore fingerprints and overwrite")
     proc.add_argument("--no-llm", action="store_true", help="transcripts only")
 
+    tune = subs.add_parser("tune", help="measure this machine and choose models")
+    tune.add_argument("--sample", help="a recording to time the speech models on")
+    tune.add_argument(
+        "--record", type=float, metavar="SECONDS", default=0.0,
+        help="record a fresh sample from the microphone first",
+    )
+    tune.add_argument("--apply", action="store_true", help="save the result to the config")
+    tune.add_argument(
+        "--context", type=int, default=32768,
+        help="context to aim for when choosing a language model (default 32768)",
+    )
+
     args = parser.parse_args(argv)
     cfg = Config.load()
 
@@ -695,6 +774,7 @@ def main(argv=None) -> int:
         "sources": cmd_sources,
         "record": cmd_record,
         "process": cmd_process,
+        "tune": cmd_tune,
         "list": cmd_list,
         "recover": cmd_recover,
     }

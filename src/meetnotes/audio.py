@@ -310,6 +310,11 @@ def candidate_backends(kind: str) -> list[str]:
 class Meter(threading.Thread):
     """Continuously reports the level of one source, using the real command."""
 
+    # How long without new samples before the meter reports silence. A capture
+    # that dies, or one whose file never appears, otherwise leaves the bar
+    # frozen at its last value, which reads as a healthy steady signal.
+    STALE_AFTER = 1.0
+
     def __init__(self, template: str, rate: int, source: Source, workdir: Path, sink):
         super().__init__(daemon=True, name=f"meter-{source.kind}")
         self.template = template
@@ -339,6 +344,7 @@ class Meter(threading.Thread):
 
         offset = None
         read = 0
+        fresh = time.monotonic()
         try:
             while not self.stop_flag.is_set():
                 time.sleep(0.1)
@@ -347,17 +353,23 @@ class Meter(threading.Thread):
                         proc.stderr.read().decode(errors="replace").strip()
                         if proc.stderr else "capture stopped"
                     )
+                    self.sink(-120.0)
                     break
-                if not self.path.exists():
-                    continue
-                if offset is None:
-                    offset = data_offset(self.path)
-                with self.path.open("rb") as fh:
-                    fh.seek(offset + read)
-                    chunk = fh.read()
-                chunk = chunk[: len(chunk) - (len(chunk) % 2)]
+                chunk = b""
+                if self.path.exists():
+                    if offset is None:
+                        offset = data_offset(self.path)
+                    with self.path.open("rb") as fh:
+                        fh.seek(offset + read)
+                        chunk = fh.read()
+                    chunk = chunk[: len(chunk) - (len(chunk) % 2)]
                 if not chunk:
+                    # A short gap is the writer buffering. A long one is not,
+                    # and holding the last value would show it as signal.
+                    if time.monotonic() - fresh > self.STALE_AFTER:
+                        self.sink(-120.0)
                     continue
+                fresh = time.monotonic()
                 read += len(chunk)
                 samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32) / 32768.0
                 self.sink(rms_dbfs(samples))
@@ -381,6 +393,8 @@ class FileMeter(threading.Thread):
     capture stream on the same device.
     """
 
+    STALE_AFTER = 1.0
+
     def __init__(self, path: Path, sink, interval: float = 0.15):
         super().__init__(daemon=True, name=f"filemeter-{path.stem}")
         self.path = path
@@ -394,21 +408,27 @@ class FileMeter(threading.Thread):
 
         offset = None
         read = 0
+        fresh = time.monotonic()
         while not self.stop_flag.is_set():
             time.sleep(self.interval)
-            if not self.path.exists():
-                continue
-            if offset is None:
-                offset = data_offset(self.path)
-            try:
-                with self.path.open("rb") as fh:
-                    fh.seek(offset + read)
-                    chunk = fh.read()
-            except OSError:
-                continue
-            chunk = chunk[: len(chunk) - (len(chunk) % 2)]
+            chunk = b""
+            if self.path.exists():
+                if offset is None:
+                    offset = data_offset(self.path)
+                try:
+                    with self.path.open("rb") as fh:
+                        fh.seek(offset + read)
+                        chunk = fh.read()
+                except OSError:
+                    chunk = b""
+                chunk = chunk[: len(chunk) - (len(chunk) % 2)]
             if not chunk:
+                # A recording that stopped producing samples is silence, not
+                # whatever the bar happened to be showing when it stopped.
+                if time.monotonic() - fresh > self.STALE_AFTER:
+                    self.sink(-120.0)
                 continue
+            fresh = time.monotonic()
             read += len(chunk)
             samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32) / 32768.0
             self.sink(rms_dbfs(samples))

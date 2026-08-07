@@ -33,26 +33,73 @@ FALLBACK_REPOS = {
     "distil-large-v3.5": "distil-whisper/distil-large-v3.5-ct2",
 }
 
-# Presentation order and a one-line character note per model.
-WHISPER_ORDER = [
-    ("large-v3-turbo", "multilingual, fast, close to large-v2 quality"),
-    ("large-v3", "multilingual, most accurate, slowest"),
-    ("large-v2", "multilingual, superseded by v3"),
-    ("medium", "multilingual, middle ground"),
-    ("small", "multilingual, fast enough for live on CPU"),
-    ("base", "multilingual, low accuracy"),
-    ("tiny", "multilingual, lowest accuracy"),
-    ("distil-large-v3.5", "ENGLISH ONLY, very fast"),
-    ("distil-large-v3", "ENGLISH ONLY, very fast"),
-    ("medium.en", "ENGLISH ONLY"),
-    ("small.en", "ENGLISH ONLY"),
-    ("base.en", "ENGLISH ONLY"),
-    ("tiny.en", "ENGLISH ONLY"),
-]
-
-ENGLISH_ONLY = {
-    alias for alias, note in WHISPER_ORDER if "ENGLISH ONLY" in note
+# alias -> (short label, parameters in millions, accuracy rank, note)
+#
+# Parameters are OpenAI's published counts for the Whisper family; turbo is
+# large-v3 with the decoder cut from 32 layers to 4. Accuracy rank is an
+# ordinal, not a score: higher is better, and equal ranks mean "no material
+# difference", which is the case for turbo against large-v2 (OpenAI: "across
+# languages, the turbo model performs similarly to large-v2").
+#
+# Ranks are within a language class. An English-only model is not comparable to
+# a multilingual one, so the two are ranked separately and the frontier is
+# computed per class.
+WHISPER_MODELS = {
+    "tiny": ("Tiny", 39, 1, "lowest accuracy, runs anywhere"),
+    "base": ("Base", 74, 2, "low accuracy"),
+    "small": ("Small", 244, 3, "fast enough for live on CPU"),
+    "medium": ("Medium", 769, 4, "middle ground"),
+    "large-v3-turbo": ("Turbo", 809, 5, "large-v2 quality at half the size"),
+    "large-v2": ("Large v2", 1550, 5, "superseded by Turbo"),
+    "large-v3": ("Large v3", 1550, 6, "most accurate, slowest"),
+    "tiny.en": ("Tiny EN", 39, 1, "lowest accuracy"),
+    "base.en": ("Base EN", 74, 2, "low accuracy"),
+    "small.en": ("Small EN", 244, 3, ""),
+    "medium.en": ("Medium EN", 769, 4, ""),
+    "distil-large-v3": ("Distil v3 EN", 756, 5, "superseded by Distil v3.5"),
+    "distil-large-v3.5": ("Distil v3.5 EN", 756, 6, "very fast"),
 }
+
+ENGLISH_ONLY = {alias for alias in WHISPER_MODELS if alias.endswith(".en")
+                or alias.startswith("distil-")}
+
+
+def dominated(alias: str, others) -> bool:
+    """True when another model is no larger and no less accurate.
+
+    Large v2 against Turbo is the case that matters: same accuracy, twice the
+    size, so nothing chooses it on purpose. Computed rather than hand-listed so
+    adding a model cannot leave a stale recommendation behind.
+    """
+    entry = WHISPER_MODELS.get(alias)
+    if not entry:
+        return False
+    _, size, rank, _ = entry
+    english = alias in ENGLISH_ONLY
+    for other in others:
+        if other == alias or (other in ENGLISH_ONLY) != english:
+            continue
+        rival = WHISPER_MODELS.get(other)
+        if not rival:
+            continue
+        _, rival_size, rival_rank, _ = rival
+        if rival_size <= size and rival_rank >= rank and (
+            rival_size < size or rival_rank > rank
+        ):
+            return True
+    return False
+
+
+def frontier(aliases=None) -> list[str]:
+    """The models worth offering: everything not dominated, largest last."""
+    pool = list(aliases if aliases is not None else WHISPER_MODELS)
+    kept = [alias for alias in pool if not dominated(alias, pool)]
+    return sorted(kept, key=lambda a: (a in ENGLISH_ONLY, WHISPER_MODELS[a][1]))
+
+
+def label(alias: str) -> str:
+    entry = WHISPER_MODELS.get(alias)
+    return entry[0] if entry else alias
 
 
 def repos() -> dict[str, str]:
@@ -77,18 +124,34 @@ def full_name(alias: str) -> str:
     return repos().get(alias, alias)
 
 
-def whisper_choices() -> list[dict]:
+def whisper_choices(all_models: bool = False) -> list[dict]:
+    """What to offer for a speech step, best-value first.
+
+    Dominated models are dropped by default: a model that is both larger and no
+    more accurate than another is a choice with no upside, and offering it only
+    invites picking it.
+    """
     known = repos()
+    pool = [alias for alias in WHISPER_MODELS if alias in known]
+    keep = pool if all_models else frontier(pool)
     out = []
-    for alias, note in WHISPER_ORDER:
-        if alias not in known:
-            continue
-        out.append({"alias": alias, "repo": known[alias], "note": note})
-    # Anything the installed library knows about that is not in the order list.
+    for alias in sorted(keep, key=lambda a: (a in ENGLISH_ONLY, -WHISPER_MODELS[a][1])):
+        short, size, _, note = WHISPER_MODELS[alias]
+        out.append({
+            "alias": alias, "label": short, "repo": known[alias],
+            "params_m": size, "note": note,
+        })
+    if not all_models:
+        return out
+    # Anything the installed library knows about that is not classified above.
+    # No size or rank is claimed for these, so they cannot be placed on the
+    # frontier and are only shown when the full list is asked for. "large" and
+    # "turbo" are aliases of models already listed.
     for alias, repo in known.items():
-        if alias in {choice["alias"] for choice in out} or alias in ("large", "turbo"):
+        if alias in WHISPER_MODELS or alias in ("large", "turbo"):
             continue
-        out.append({"alias": alias, "repo": repo, "note": ""})
+        out.append({"alias": alias, "label": alias, "repo": repo,
+                    "params_m": 0, "note": "unclassified"})
     return out
 
 
