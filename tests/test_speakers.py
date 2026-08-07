@@ -15,7 +15,7 @@
 
 import pytest
 
-from meetnotes import audio, outputs, session, store
+from meetnotes import audio, llm, outputs, session, store
 from meetnotes.config import Config
 
 
@@ -47,7 +47,9 @@ def recording(tmp_path, monkeypatch):
     cfg.data_dir = str(tmp_path)
     cfg.capture.mic_source = "1"
     cfg.capture.system_source = "2"
-    cfg.llm.free_vram_before_recording = False
+    # Unloading is unconditional now, so it has to be stubbed rather than
+    # switched off. Without the lms CLI it is a no-op anyway.
+    monkeypatch.setattr(llm, "unload_all", lambda: (False, "no lms in tests"))
 
     started = {}
 

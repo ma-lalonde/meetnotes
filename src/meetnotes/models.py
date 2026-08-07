@@ -248,7 +248,7 @@ def vram_cost_mb(alias: str, compute_type: str) -> int:
     return int(entry[1] * MB_PER_MILLION_FP16 * COMPUTE_SCALE.get(compute_type, 1.0))
 
 
-def hardware_pool(device: str, free_mb: int, pool: list[str]) -> tuple[list[str], str]:
+def hardware_pool(device: str, free_mb: int, pool: list[str]) -> list[str]:
     """Narrow the list to what this machine should actually be offered.
 
     On a GPU, speed is never the binding constraint: Turbo runs at roughly 8x
@@ -259,17 +259,18 @@ def hardware_pool(device: str, free_mb: int, pool: list[str]) -> tuple[list[str]
 
     On CPU it is the opposite. The live pass has to beat speech in absolute
     terms, not relative to another model, and how close a given CPU gets is not
-    something that can be read off a table. The ladder stays, and
-    `meetnotes tune --record` is how it gets settled by measurement.
+    something that can be read off a table. The ladder stays there, narrowed
+    per pass by step_pool, and `meetnotes tune --record` settles the rest by
+    measurement.
     """
     if device != "cuda" or not free_mb:
-        return pool, ""
+        return pool
 
     fits = [a for a in pool if vram_cost_mb(a, "float16") <= free_mb]
     if GPU_ANCHOR not in fits:
         # Not enough room for the model this would otherwise settle on, so the
         # smaller ones are the point rather than clutter.
-        return fits or pool, ""
+        return fits or pool
 
     # Ranks only mean anything inside a language class, so each class is
     # trimmed against its own anchor. Comparing Distil v3.5's English rank
@@ -284,11 +285,7 @@ def hardware_pool(device: str, free_mb: int, pool: list[str]) -> tuple[list[str]
             continue
         floor = WHISPER_MODELS[anchor][2]
         kept.extend(a for a in group if WHISPER_MODELS[a][2] >= floor)
-    return kept, (
-        f"This GPU has room for {WHISPER_MODELS[GPU_ANCHOR][0]}, which is about "
-        f"as fast as the small models and far more accurate, so only it and "
-        f"anything better are offered."
-    )
+    return kept
 
 
 def why_not_offered(alias: str, cfg=None, device: str = "", vram_mb: int = 0) -> str:
@@ -362,8 +359,7 @@ def whisper_choices(cfg=None, all_models: bool = False, device: str = "",
         twinned = {base for base, twin in ENGLISH_TWIN.items() if twin in pool}
         pool = [alias for alias in pool if alias not in twinned]
     if not all_models and device:
-        pool, _ = hardware_pool(device, free_mb, pool)
-        pool = step_pool(step, device, pool)
+        pool = step_pool(step, device, hardware_pool(device, free_mb, pool))
     # Re-run: collapsing the English twins can leave a new model dominated.
     keep = frontier(pool)
     out = []

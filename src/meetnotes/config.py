@@ -84,9 +84,7 @@ class Llm:
     model: str = ""
     temperature: float = 0.2
     timeout: float = 600.0
-    keep_asr_loaded: bool = False
     ttl_seconds: int = 300
-    free_vram_before_recording: bool = True
     # Reload the model with a context length sized to the transcript. Needs the
     # lms CLI; ignored without it.
     auto_context: bool = True

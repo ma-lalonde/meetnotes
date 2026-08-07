@@ -190,9 +190,14 @@ trustworthy. An LLM rewrite is available per meeting, never automatic.
 **GPU memory.** Speech recognition runs in a child process, because CTranslate2
 allocates through a caching allocator that never returns VRAM to the driver
 while the process lives; its exit is the only release. Language models are
-unloaded before a load and before recording starts (`lms unload --all`), and
-requests carry a `ttl` so LM Studio drops the model when idle. At most one model
-is resident at a time.
+unloaded before a load and before recording starts (`lms unload --all`), the
+speech model is released before summarizing, and requests carry a `ttl` so LM
+Studio drops the model when idle.
+
+**One model at a time, with no way to ask for two.** The passes never need the
+card together, and holding one while the other loads is the entire reason
+summarizing ran out of memory. There is no setting to keep either resident,
+because the only thing such a setting can do is reproduce that failure.
 
 **Choosing models.** Free VRAM decides more than it should: freeing a gigabyte
 by switching NVIDIA PRIME to on-demand can be the difference between a 4k

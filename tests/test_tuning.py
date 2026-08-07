@@ -279,6 +279,37 @@ def test_apply_writes_every_field_it_decided(tmp_path, monkeypatch):
     assert reloaded.llm.max_context == 32768
 
 
+def test_the_speech_model_is_always_released_before_summarizing(tmp_path, monkeypatch):
+    # There is no setting to skip this: the two models never need the card at
+    # the same time, and holding one while the other loads is the whole reason
+    # summarizing ran out of memory.
+    from meetnotes import asr, config as config_module
+
+    assert not hasattr(Config().llm, "keep_asr_loaded")
+    monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.json")
+    released = []
+    monkeypatch.setattr(asr, "unload_all", lambda: released.append(True))
+
+    import inspect
+
+    from meetnotes import pipeline
+
+    source = inspect.getsource(pipeline._summarize)
+    assert "asr.unload_all()" in source
+    # and not behind a condition
+    assert "keep_asr_loaded" not in source
+
+
+def test_language_models_are_always_unloaded_before_recording():
+    import inspect
+
+    from meetnotes import session
+
+    source = inspect.getsource(session.Session.start)
+    assert "llm.unload_all()" in source
+    assert "free_vram_before_recording" not in source
+
+
 def test_apply_does_not_clear_a_model_it_could_not_choose(tmp_path, monkeypatch):
     from meetnotes import config as config_module
 

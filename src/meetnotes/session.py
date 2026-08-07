@@ -84,11 +84,11 @@ class Session:
             {mine: cap.mic_source, theirs: cap.system_source},
             self.path / "audio",
         )
-        if self.cfg.llm.free_vram_before_recording:
-            # The language model has no reason to hold VRAM during a meeting.
-            freed, detail = llm.unload_all()
-            if freed:
-                self.on_state("idle", f"freed GPU memory: {detail}")
+        # Always: the language model has no reason to hold VRAM during a
+        # meeting, and the speech model is about to need it.
+        freed, detail = llm.unload_all()
+        if freed:
+            self.on_state("idle", f"freed GPU memory: {detail}")
 
         self.recorder.start()
         self.started_at = self.recorder.started_at

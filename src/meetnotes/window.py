@@ -471,8 +471,6 @@ class SettingsScreen(QWidget):
         self.temperature.setSingleStep(0.1)
         self.temperature.setValue(cfg.llm.temperature)
         theme.comfortable(self.temperature)
-        self.keep_loaded = QCheckBox("Keep the speech model loaded while summarizing")
-        self.keep_loaded.setChecked(cfg.llm.keep_asr_loaded)
 
         self.summary_prompt = QPlainTextEdit(cfg.llm.summary_prompt)
         self.actions_prompt = QPlainTextEdit(cfg.llm.actions_prompt)
@@ -523,7 +521,6 @@ class SettingsScreen(QWidget):
         model_form = QFormLayout(model)
         model_form.addRow("", QLabel("Server and model selection live in the Models tab."))
         model_form.addRow("Temperature", self.temperature)
-        model_form.addRow("", self.keep_loaded)
         model_form.addRow("Summary prompt", self.summary_prompt)
         model_form.addRow("Actions prompt", self.actions_prompt)
 
@@ -668,7 +665,6 @@ class SettingsScreen(QWidget):
         cfg.asr.language = codes[0] if codes else ""
         cfg.asr.multilingual = self.multilingual.isChecked()
         cfg.llm.temperature = self.temperature.value()
-        cfg.llm.keep_asr_loaded = self.keep_loaded.isChecked()
         cfg.llm.summary_prompt = self.summary_prompt.toPlainText().strip()
         cfg.llm.actions_prompt = self.actions_prompt.toPlainText().strip()
         cfg.save()
@@ -703,7 +699,6 @@ class ModelsScreen(QWidget):
         self.final_note = self._note()
         self.summary_note = self._note()
         self.language_note = self._note()
-        self.hardware_note = self._note()
         self._device = "cpu"
         self._free_mb = 0
         self.show_all = QCheckBox("Show models this machine or language setting rules out")
@@ -715,7 +710,6 @@ class ModelsScreen(QWidget):
 
         speech = QWidget()
         speech_form = QFormLayout(speech)
-        speech_form.addRow("", self.hardware_note)
         speech_form.addRow("", self.language_note)
         speech_form.addRow("", self.show_all)
         speech_form.addRow("Live transcription", self.live)
@@ -730,12 +724,6 @@ class ModelsScreen(QWidget):
             "coming back garbled. Whisper cannot be calibrated to a voice; this "
             "is the lever it does have."
         ))
-        speech_form.addRow("", self._note(
-            "int8 roughly halves the memory of float16 with little quality cost. "
-            "CTranslate2 accepts several more compute types, but they differ only "
-            "in the precision of the layers that are not quantized, which is not "
-            "a difference you can hear on a speech model."
-        ))
 
         self.provider = QComboBox()
         self.provider.addItem("Custom", "")
@@ -748,8 +736,6 @@ class ModelsScreen(QWidget):
         self.ttl.setRange(0, 86400)
         self.ttl.setSuffix(" s")
         self.ttl.setValue(cfg.llm.ttl_seconds)
-        self.free_vram = QCheckBox("Unload language models before recording starts")
-        self.free_vram.setChecked(cfg.llm.free_vram_before_recording)
         theme.comfortable(self.provider, self.base_url, self.api_key, self.ttl)
         fetch = QPushButton("Fetch models")
         fetch.clicked.connect(self.fetch)
@@ -772,7 +758,6 @@ class ModelsScreen(QWidget):
             "LM Studio unloads a model after this long idle. 0 disables it; other "
             "servers ignore the field."
         ))
-        summarize_form.addRow("", self.free_vram)
         summarize_form.addRow("", server_row)
 
         save = QPushButton("Save")
@@ -880,11 +865,6 @@ class ModelsScreen(QWidget):
         self._free_mb = models.vram_budget(
             gpus[0]["vram_mb"], gpus[0].get("free_mb", 0)
         ) if gpus else 0
-        pool = [c["alias"] for c in models.whisper_choices(self.cfg)]
-        _, reason = models.hardware_pool(self._device, self._free_mb, pool)
-        self.hardware_note.setText(reason)
-        self.hardware_note.setVisible(bool(reason) and not self.show_all.isChecked())
-
         # The two passes get different lists on a processor: the live one has a
         # hard deadline, the final one only has to finish in reasonable time.
         self._fill_whisper(
@@ -1024,7 +1004,6 @@ class ModelsScreen(QWidget):
         cfg.llm.api_key = self.api_key.text().strip()
         cfg.llm.model = self.summary.currentData() or self.summary.currentText().strip()
         cfg.llm.ttl_seconds = self.ttl.value()
-        cfg.llm.free_vram_before_recording = self.free_vram.isChecked()
         cfg.save()
         self.window.reload()
         self.status.setText("Saved.")

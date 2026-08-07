@@ -239,12 +239,13 @@ def _model_log(path: Path, cfg, source: str):
 def _summarize(path: Path, meta: dict, segments: list[dict], cfg, force, progress) -> dict:
     report: dict[str, str] = {}
     store.update_meta(path, state="summarizing")
-    if not cfg.llm.keep_asr_loaded:
-        # Only meaningful for in-process CPU models. GPU recognition already
-        # released its memory by exiting; nothing in this process can free it.
-        asr.unload_all()
-        if progress:
-            progress(f"speech model released.{llm.vram_note()}")
+    # Always: the two models never need the card at the same time, and holding
+    # one while the other loads is the whole reason summarizing runs out of
+    # memory. Only meaningful for in-process CPU models; GPU recognition
+    # released its memory by exiting, and nothing in this process can free it.
+    asr.unload_all()
+    if progress:
+        progress(f"speech model released.{llm.vram_note()}")
 
     spoken = [s for s in segments if outputs.clean_text(s.get("text", ""))]
     if not spoken and not meta.get("notes"):

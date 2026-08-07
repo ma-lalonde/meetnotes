@@ -211,14 +211,19 @@ def test_no_device_given_narrows_nothing():
     assert plain == cpu
 
 
-def test_the_narrowing_explains_itself_only_when_it_narrows():
+def test_the_narrowing_only_applies_where_it_has_something_to_say():
     pool = [c["alias"] for c in models.whisper_choices(_bilingual())]
-    _, roomy = models.hardware_pool("cuda", 7600, pool)
-    _, cramped = models.hardware_pool("cuda", 1500, pool)
-    _, cpu = models.hardware_pool("cpu", 0, pool)
-    assert "Turbo" in roomy
-    assert cramped == ""
-    assert cpu == ""
+    roomy = models.hardware_pool("cuda", 7600, pool)
+    cramped = models.hardware_pool("cuda", 1500, pool)
+    cpu = models.hardware_pool("cpu", 0, pool)
+    # Room for Turbo: only it and better.
+    assert set(roomy) == {"large-v3-turbo", "large-v3"}
+    # No room for Turbo: the small models are the point, so nothing is trimmed
+    # beyond what fits.
+    assert "large-v3-turbo" not in cramped
+    assert {"small", "base", "tiny"} <= set(cramped)
+    # CPU is narrowed per pass instead, by step_pool.
+    assert cpu == pool
 
 
 def test_turbo_is_faster_than_the_models_it_displaces():
