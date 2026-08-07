@@ -34,11 +34,9 @@ from pathlib import Path
 from . import asr, hardware, llm, models
 
 
-# Bytes of VRAM per million parameters, at float16, plus activations and
-# workspace. Measured against turbo (809 M, about 2.0 GB resident), which is
-# the model this is tuned for; it is a straight line, not a model of anything.
-MB_PER_MILLION_FP16 = 2.5
-COMPUTE_SCALE = {"float16": 1.0, "int8_float16": 0.6, "int8": 0.55, "float32": 2.0}
+# Model sizing lives with the model table, since that is where it is also used
+# to decide which models are worth offering at all.
+vram_cost_mb = models.vram_cost_mb
 
 # A live model must transcribe faster than speech arrives or it falls behind
 # without limit. Below this share of realtime it keeps up with headroom.
@@ -48,15 +46,6 @@ LIVE_REALTIME_TARGET = 0.5
 # worse than realtime an hour of audio takes more than an hour to transcribe,
 # which nobody waits for.
 FINAL_REALTIME_TARGET = 1.0
-
-
-def vram_cost_mb(alias: str, compute_type: str) -> int:
-    """Rough resident size for a speech model. Zero when the size is unknown."""
-    entry = models.WHISPER_MODELS.get(alias)
-    if not entry:
-        return 0
-    params = entry[1]
-    return int(params * MB_PER_MILLION_FP16 * COMPUTE_SCALE.get(compute_type, 1.0))
 
 
 @dataclass
@@ -96,7 +85,7 @@ def candidates(device: str, free_mb: int, compute_type: str, cfg=None) -> list[s
     and never when no configuration is given: silently making a bilingual setup
     English-only is worse than picking a slightly smaller model.
     """
-    pool = [c["alias"] for c in models.whisper_choices(cfg)
+    pool = [c["alias"] for c in models.whisper_choices(cfg, device=device, free_mb=free_mb)
             if cfg is not None or c["alias"] not in models.ENGLISH_ONLY]
     if device == "cuda" and free_mb:
         pool = [a for a in pool if vram_cost_mb(a, compute_type) <= free_mb]

@@ -117,6 +117,85 @@ def test_the_most_accurate_model_is_never_dropped():
     assert "large-v3" in offered
 
 
+def _bilingual():
+    cfg = Config()
+    cfg.asr.language_mode = "restrict"
+    cfg.asr.languages = ["fr", "en"]
+    return cfg
+
+
+def test_a_gpu_with_room_for_turbo_is_offered_only_turbo_and_better():
+    # Turbo runs at about 8x against Tiny's 10x, so once it fits, the smaller
+    # models cost several tiers of accuracy to save a quarter of the time.
+    offered = {c["alias"] for c in
+               models.whisper_choices(_bilingual(), device="cuda", free_mb=7600)}
+    assert offered == {"large-v3-turbo", "large-v3"}
+
+
+def test_a_gpu_too_small_for_large_v3_still_gets_turbo():
+    offered = {c["alias"] for c in
+               models.whisper_choices(_bilingual(), device="cuda", free_mb=3500)}
+    assert offered == {"large-v3-turbo"}
+
+
+def test_a_gpu_too_small_for_turbo_gets_the_ladder_back():
+    # Here the small models are the point rather than clutter.
+    offered = {c["alias"] for c in
+               models.whisper_choices(_bilingual(), device="cuda", free_mb=1500)}
+    assert "large-v3-turbo" not in offered
+    assert {"small", "base", "tiny"} <= offered
+
+
+def test_a_nearly_full_card_offers_only_what_fits():
+    offered = {c["alias"] for c in
+               models.whisper_choices(_bilingual(), device="cuda", free_mb=400)}
+    assert offered
+    for alias in offered:
+        assert models.vram_cost_mb(alias, "float16") <= 400
+
+
+def test_cpu_keeps_the_ladder():
+    # The live pass has to beat speech in absolute terms, and how close a given
+    # CPU gets is not something a relative-speed table can answer.
+    offered = {c["alias"] for c in
+               models.whisper_choices(_bilingual(), device="cpu")}
+    assert {"small", "base", "tiny"} <= offered
+
+
+def test_no_device_given_narrows_nothing():
+    plain = {c["alias"] for c in models.whisper_choices(_bilingual())}
+    cpu = {c["alias"] for c in models.whisper_choices(_bilingual(), device="cpu")}
+    assert plain == cpu
+
+
+def test_show_every_model_overrides_the_hardware_narrowing():
+    everything = {c["alias"] for c in models.whisper_choices(
+        _bilingual(), all_models=True, device="cuda", free_mb=7600)}
+    assert "tiny" in everything
+    assert "medium" in everything
+
+
+def test_the_narrowing_explains_itself_only_when_it_narrows():
+    pool = [c["alias"] for c in models.whisper_choices(_bilingual())]
+    _, roomy = models.hardware_pool("cuda", 7600, pool)
+    _, cramped = models.hardware_pool("cuda", 1500, pool)
+    _, cpu = models.hardware_pool("cpu", 0, pool)
+    assert "Turbo" in roomy
+    assert cramped == ""
+    assert cpu == ""
+
+
+def test_turbo_is_faster_than_the_models_it_displaces():
+    # The whole argument rests on this: Turbo is not a compromise on speed
+    # against Small or Medium, it is strictly faster than both.
+    turbo = models.RELATIVE_SPEED["large-v3-turbo"]
+    assert turbo > models.RELATIVE_SPEED["small"]
+    assert turbo > models.RELATIVE_SPEED["medium"]
+    assert turbo > models.RELATIVE_SPEED["base"]
+    # And only slightly behind Tiny, which is the point.
+    assert turbo >= models.RELATIVE_SPEED["tiny"] * 0.75
+
+
 def test_english_and_multilingual_are_ranked_separately():
     # A small English-only model is not "better than" a multilingual one; they
     # do different jobs, so neither can dominate the other.

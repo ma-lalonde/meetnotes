@@ -227,6 +227,25 @@ accuracy rank rather than hand-listed, so adding a model cannot leave a stale
 recommendation behind, and a test asserts the surviving models stay more than
 that margin apart so the rule cannot cascade.
 
+**The list also follows the hardware.** On a GPU, speed is never the binding
+constraint. Whisper's own figures put Turbo at ~8x against Tiny's ~10x, so a
+card with room for Turbo gains a quarter of the time from the small models and
+loses several tiers of accuracy for it. Memory is the only real limit:
+
+| Free VRAM | Offered |
+| --- | --- |
+| 7.6 GB | Large v3, Turbo |
+| 3.5 GB | Turbo |
+| 1.5 GB | Small, Base, Tiny |
+| 400 MB | Base, Tiny |
+| CPU | Large v3, Turbo, Small, Base, Tiny |
+
+CPU keeps the full ladder on purpose: the live pass has to beat speech in
+absolute terms, not relative to another model, and how close a given CPU gets is
+not something a relative-speed table can answer. `meetnotes tune --record 30`
+settles it by measurement. **Show every model** in the Models tab disables all of
+this narrowing.
+
 **The list follows the language setting.** English-only (`.en`) models have the
 same parameter count as the multilingual models they were cut from and are
 better at English for it - Whisper's README: they "tend to perform better,

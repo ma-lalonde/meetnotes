@@ -706,6 +706,11 @@ class ModelsScreen(QWidget):
         self.final_note = self._note()
         self.summary_note = self._note()
         self.language_note = self._note()
+        self.hardware_note = self._note()
+        self._device = "cpu"
+        self._free_mb = 0
+        self.show_all = QCheckBox("Show every model, including ones this machine should not use")
+        self.show_all.toggled.connect(self.reload)
         self.vocabulary = QPlainTextEdit("\n".join(cfg.asr.vocabulary))
         self.vocabulary.setPlaceholderText("Chloé Gagnon\nCatena\nPortainer")
         self.vocabulary.setMaximumHeight(110)
@@ -713,7 +718,9 @@ class ModelsScreen(QWidget):
 
         speech = QWidget()
         speech_form = QFormLayout(speech)
+        speech_form.addRow("", self.hardware_note)
         speech_form.addRow("", self.language_note)
+        speech_form.addRow("", self.show_all)
         speech_form.addRow("Live transcription", self.live)
         speech_form.addRow("", self.live_note)
         speech_form.addRow("Final pass", self.final)
@@ -815,10 +822,13 @@ class ModelsScreen(QWidget):
         combo.clear()
         if allow_skip:
             combo.addItem("Skip the final pass, keep the live transcript", "")
-        # Passing the config drops English-only models unless the configured
-        # languages are English and nothing else. They cannot do French, so on
-        # a bilingual setup they are choices that can only go wrong.
-        for choice in models.whisper_choices(self.cfg):
+        # The config drops English-only models unless the configured languages
+        # are English and nothing else; the device and free VRAM drop the small
+        # models on a card with room for Turbo, which is as fast as they are.
+        for choice in models.whisper_choices(
+            self.cfg, all_models=self.show_all.isChecked(),
+            device=self._device, free_mb=self._free_mb,
+        ):
             size = f"{choice['params_m']} M" if choice["params_m"] else ""
             note = f"  -  {choice['note']}" if choice["note"] else ""
             combo.addItem(f"{choice['label']}   {size}{note}", choice["alias"])
@@ -858,6 +868,16 @@ class ModelsScreen(QWidget):
             )
         else:
             self.gpu.setText(f"No GPU detected, running on {plan['device']}")
+
+        # Read once per reload: _fill_whisper is called twice and nvidia-smi is
+        # a subprocess, so asking it per combo box would double the cost and
+        # could hand the two lists different numbers.
+        self._device = plan["device"]
+        self._free_mb = gpus[0].get("free_mb", 0) if gpus else 0
+        pool = [c["alias"] for c in models.whisper_choices(self.cfg)]
+        _, reason = models.hardware_pool(self._device, self._free_mb, pool)
+        self.hardware_note.setText(reason)
+        self.hardware_note.setVisible(bool(reason) and not self.show_all.isChecked())
 
         self._fill_whisper(self.live, self.cfg.asr.live_model or plan["live_model"], False)
         self._fill_whisper(

@@ -92,6 +92,20 @@ ENGLISH_TWIN = {
 # materially worse model, so a rival within this margin still displaces it.
 SIZE_TOLERANCE = 0.10
 
+# Relative speed from Whisper's README, large = 1x. The number that matters:
+# Turbo is ~8x against Tiny's ~10x, so on hardware that can hold Turbo the
+# smaller models buy a quarter more speed for several tiers of accuracy. They
+# exist to fit in less memory, not to go faster.
+RELATIVE_SPEED = {
+    "tiny": 10, "tiny.en": 10,
+    "base": 7, "base.en": 7,
+    "small": 4, "small.en": 4,
+    "medium": 2, "medium.en": 2,
+    "large-v3-turbo": 8,
+    "large-v2": 1, "large-v3": 1,
+    "distil-large-v3": 6, "distil-large-v3.5": 6,
+}
+
 
 def dominated(alias: str, others) -> bool:
     """True when another model is better and not meaningfully larger.
@@ -173,7 +187,60 @@ def english_only_setup(cfg) -> bool:
     return codes == {"en"}
 
 
-def whisper_choices(cfg=None, all_models: bool = False) -> list[dict]:
+# Bytes of VRAM per million parameters at float16, plus activations and
+# workspace. Calibrated against Turbo (809 M, about 2.0 GB resident) and
+# extrapolated linearly; it decides which models are worth offering and timing,
+# not what actually gets loaded.
+MB_PER_MILLION_FP16 = 2.5
+COMPUTE_SCALE = {"float16": 1.0, "int8_float16": 0.6, "int8": 0.55, "float32": 2.0}
+
+# The model a GPU is expected to run. Anything less accurate than this exists to
+# fit in less memory, so once it fits there is no reason to offer them.
+GPU_ANCHOR = "large-v3-turbo"
+
+
+def vram_cost_mb(alias: str, compute_type: str) -> int:
+    """Rough resident size for a speech model. Zero when the size is unknown."""
+    entry = WHISPER_MODELS.get(alias)
+    if not entry:
+        return 0
+    return int(entry[1] * MB_PER_MILLION_FP16 * COMPUTE_SCALE.get(compute_type, 1.0))
+
+
+def hardware_pool(device: str, free_mb: int, pool: list[str]) -> tuple[list[str], str]:
+    """Narrow the list to what this machine should actually be offered.
+
+    On a GPU, speed is never the binding constraint: Turbo runs at roughly 8x
+    against Tiny's 10x, so a card with room for Turbo gains nothing from the
+    smaller models and loses several tiers of accuracy to them. Memory is the
+    only real limit, so the list becomes Turbo and anything more accurate that
+    still fits.
+
+    On CPU it is the opposite. The live pass has to beat speech in absolute
+    terms, not relative to another model, and how close a given CPU gets is not
+    something that can be read off a table. The ladder stays, and
+    `meetnotes tune --record` is how it gets settled by measurement.
+    """
+    if device != "cuda" or not free_mb:
+        return pool, ""
+
+    fits = [a for a in pool if vram_cost_mb(a, "float16") <= free_mb]
+    if GPU_ANCHOR not in fits:
+        # Not enough room for the model this would otherwise settle on, so the
+        # smaller ones are the point rather than clutter.
+        return fits or pool, ""
+
+    anchor_rank = WHISPER_MODELS[GPU_ANCHOR][2]
+    kept = [a for a in fits if WHISPER_MODELS[a][2] >= anchor_rank]
+    return kept, (
+        f"This GPU has room for {WHISPER_MODELS[GPU_ANCHOR][0]}, which is about "
+        f"as fast as the small models and far more accurate, so only it and "
+        f"anything better are offered."
+    )
+
+
+def whisper_choices(cfg=None, all_models: bool = False, device: str = "",
+                    free_mb: int = 0) -> list[dict]:
     """What to offer for a speech step, best-value first.
 
     Dominated models are dropped by default: a model that is both larger and no
@@ -192,6 +259,8 @@ def whisper_choices(cfg=None, all_models: bool = False) -> list[dict]:
         # of the two: same size, worse at the only language being spoken.
         twinned = {base for base, twin in ENGLISH_TWIN.items() if twin in pool}
         pool = [alias for alias in pool if alias not in twinned]
+    if not all_models and device:
+        pool, _ = hardware_pool(device, free_mb, pool)
     keep = pool if all_models else frontier(pool)
     out = []
     for alias in sorted(keep, key=lambda a: (a in ENGLISH_ONLY, -WHISPER_MODELS[a][1])):
