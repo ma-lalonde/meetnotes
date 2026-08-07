@@ -248,10 +248,19 @@ an 8 GB card whether or not LM Studio is holding six of them. A list that
 changed because another application was resident when the tab opened would be
 the same friction in a new place.
 
-CPU keeps the full ladder on purpose: the live pass has to beat speech in
-absolute terms, not relative to another model, and how close a given CPU gets is
-not something a relative-speed table can answer. `meetnotes tune --record 30`
-settles it by measurement.
+On CPU the limits are absolute rather than relative, and the two passes differ:
+
+| Pass | Offered on CPU |
+| --- | --- |
+| Live | Base, Tiny |
+| Final | Turbo, Small, Base, Tiny |
+
+Only the two smallest reliably transcribe faster than speech arrives, and a
+live pass that falls behind never catches up. Large v3 is not offered for the
+final pass either: at 1x relative speed an hour of audio takes longer than the
+meeting did. `meetnotes tune --record 30` settles the rest by measurement, and
+still respects both limits, since one quiet sample can time well on a model
+that falls behind in a real meeting.
 
 The hardware and language rules are **situational** - right on one machine,
 wrong on another - so the Models tab can waive both with *Show models this

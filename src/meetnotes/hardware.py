@@ -30,7 +30,11 @@ PROFILES = {
         "compute_type": "float16",
     },
     "cpu": {
-        "live_model": "small",
+        # base, not small: on a processor only the two smallest reliably
+        # transcribe faster than speech arrives, and falling behind on the live
+        # pass compounds without limit. The final pass is where accuracy is
+        # bought back, at a latency nobody is waiting on.
+        "live_model": "base",
         "final_model": "large-v3-turbo",
         "device": "cpu",
         "compute_type": "int8",

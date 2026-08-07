@@ -72,7 +72,9 @@ def test_gpu_profile_selects_turbo_on_cuda(monkeypatch):
 def test_cpu_profile_when_cuda_absent(monkeypatch):
     monkeypatch.setattr(hardware, "cuda_runtime_ok", lambda: False)
     plan = hardware.plan(Config())
-    assert (plan["profile"], plan["live_model"], plan["device"]) == ("cpu", "small", "cpu")
+    # base, not small: only the two smallest reliably beat speech on a CPU, and
+    # a live pass that falls behind never catches up.
+    assert (plan["profile"], plan["live_model"], plan["device"]) == ("cpu", "base", "cpu")
 
 
 def test_cuda_request_downgrades_when_runtime_missing(monkeypatch):

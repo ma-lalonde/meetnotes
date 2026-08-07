@@ -220,6 +220,13 @@ GPU_ANCHOR = "large-v3-turbo"
 # accurate enough that nothing below it is worth offering once it fits.
 ENGLISH_ANCHOR = "distil-large-v3.5"
 
+# On a processor the limits are absolute, not relative to another model. Only
+# the two smallest reliably transcribe faster than speech arrives, so nothing
+# above them belongs on the live pass; and Large v3 at 1x relative speed would
+# take longer than the meeting did, so it does not belong on the final pass.
+CPU_LIVE = {"tiny", "base", "tiny.en", "base.en"}
+CPU_FINAL_EXCLUDED = {"large-v3"}
+
 def vram_budget(total_mb: int, free_mb: int = 0) -> int:
     """What the card has, not what happens to be free right now.
 
@@ -311,8 +318,22 @@ def why_not_offered(alias: str, cfg=None, device: str = "", vram_mb: int = 0) ->
     return "not offered for this machine"
 
 
+def step_pool(step: str, device: str, pool: list[str]) -> list[str]:
+    """Narrow to what a given pass can actually use on this device.
+
+    Only CPU needs this. On a GPU both passes run far faster than realtime, so
+    the same list serves each; on a processor the live pass has a hard deadline
+    and the final pass has a patience limit, and they exclude different models.
+    """
+    if device != "cpu" or not step:
+        return pool
+    if step == "live":
+        return [a for a in pool if a in CPU_LIVE] or pool
+    return [a for a in pool if a not in CPU_FINAL_EXCLUDED] or pool
+
+
 def whisper_choices(cfg=None, all_models: bool = False, device: str = "",
-                    free_mb: int = 0) -> list[dict]:
+                    free_mb: int = 0, step: str = "") -> list[dict]:
     """What to offer for a speech step, best-value first.
 
     Two kinds of filtering, and only one of them is negotiable.
@@ -342,6 +363,7 @@ def whisper_choices(cfg=None, all_models: bool = False, device: str = "",
         pool = [alias for alias in pool if alias not in twinned]
     if not all_models and device:
         pool, _ = hardware_pool(device, free_mb, pool)
+        pool = step_pool(step, device, pool)
     # Re-run: collapsing the English twins can leave a new model dominated.
     keep = frontier(pool)
     out = []

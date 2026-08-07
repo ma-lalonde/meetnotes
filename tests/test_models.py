@@ -162,6 +162,49 @@ def test_cpu_keeps_the_ladder():
     assert {"small", "base", "tiny"} <= offered
 
 
+def test_cpu_offers_only_the_two_smallest_for_the_live_pass():
+    # A live pass that falls behind on a CPU never catches up.
+    offered = {c["alias"] for c in
+               models.whisper_choices(_bilingual(), device="cpu", step="live")}
+    assert offered == {"base", "tiny"}
+
+
+def test_cpu_does_not_offer_large_v3_for_the_final_pass():
+    # At 1x relative speed an hour of audio takes longer than the meeting did.
+    offered = {c["alias"] for c in
+               models.whisper_choices(_bilingual(), device="cpu", step="final")}
+    assert "large-v3" not in offered
+    assert "large-v3-turbo" in offered
+    assert {"small", "base", "tiny"} <= offered
+
+
+def test_a_gpu_gives_both_passes_the_same_list():
+    # On a GPU both passes run far faster than realtime, so neither limit binds.
+    live = {c["alias"] for c in models.whisper_choices(
+        _bilingual(), device="cuda", free_mb=8188, step="live")}
+    final = {c["alias"] for c in models.whisper_choices(
+        _bilingual(), device="cuda", free_mb=8188, step="final")}
+    assert live == final == {"large-v3", "large-v3-turbo"}
+
+
+def test_the_cpu_live_list_survives_an_english_only_setup():
+    cfg = Config()
+    cfg.asr.language_mode = "restrict"
+    cfg.asr.languages = ["en"]
+    offered = {c["alias"] for c in
+               models.whisper_choices(cfg, device="cpu", step="live")}
+    assert offered == {"base.en", "tiny.en"}
+
+
+def test_a_step_never_leaves_the_list_empty():
+    # Narrowing that removes everything would offer no choice at all.
+    for device in ("cpu", "cuda"):
+        for step in ("live", "final"):
+            assert models.whisper_choices(
+                _bilingual(), device=device, free_mb=400, step=step
+            )
+
+
 def test_no_device_given_narrows_nothing():
     plain = {c["alias"] for c in models.whisper_choices(_bilingual())}
     cpu = {c["alias"] for c in models.whisper_choices(_bilingual(), device="cpu")}

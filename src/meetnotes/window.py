@@ -814,7 +814,8 @@ class ModelsScreen(QWidget):
         theme.muted(label)
         return label
 
-    def _fill_whisper(self, combo: QComboBox, current: str, allow_skip: bool):
+    def _fill_whisper(self, combo: QComboBox, current: str, allow_skip: bool,
+                      step: str = ""):
         combo.blockSignals(True)
         combo.clear()
         if allow_skip:
@@ -824,7 +825,7 @@ class ModelsScreen(QWidget):
         # models on a card with room for Turbo, which is as fast as they are.
         for choice in models.whisper_choices(
             self.cfg, all_models=self.show_all.isChecked(),
-            device=self._device, free_mb=self._free_mb,
+            device=self._device, free_mb=self._free_mb, step=step,
         ):
             size = f"{choice['params_m']} M" if choice["params_m"] else ""
             note = f"  -  {choice['note']}" if choice["note"] else ""
@@ -884,11 +885,15 @@ class ModelsScreen(QWidget):
         self.hardware_note.setText(reason)
         self.hardware_note.setVisible(bool(reason) and not self.show_all.isChecked())
 
-        self._fill_whisper(self.live, self.cfg.asr.live_model or plan["live_model"], False)
+        # The two passes get different lists on a processor: the live one has a
+        # hard deadline, the final one only has to finish in reasonable time.
+        self._fill_whisper(
+            self.live, self.cfg.asr.live_model or plan["live_model"], False, step="live"
+        )
         self._fill_whisper(
             self.final,
             "" if not self.cfg.asr.final_pass else (self.cfg.asr.final_model or plan["final_model"]),
-            True,
+            True, step="final",
         )
         self.live_note.setText(
             "Runs on short windows while the meeting happens. Speed matters more than accuracy."

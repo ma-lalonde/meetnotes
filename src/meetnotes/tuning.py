@@ -89,7 +89,8 @@ class Plan:
     notes: list[str] = field(default_factory=list)
 
 
-def candidates(device: str, free_mb: int, compute_type: str, cfg=None) -> list[str]:
+def candidates(device: str, free_mb: int, compute_type: str, cfg=None,
+               step: str = "") -> list[str]:
     """Speech models worth timing, largest first.
 
     Only the frontier, and on GPU only what fits in the memory actually free
@@ -98,7 +99,8 @@ def candidates(device: str, free_mb: int, compute_type: str, cfg=None) -> list[s
     and never when no configuration is given: silently making a bilingual setup
     English-only is worse than picking a slightly smaller model.
     """
-    pool = [c["alias"] for c in models.whisper_choices(cfg, device=device, free_mb=free_mb)
+    pool = [c["alias"] for c in
+            models.whisper_choices(cfg, device=device, free_mb=free_mb, step=step)
             if cfg is not None or c["alias"] not in models.ENGLISH_ONLY]
     if device == "cuda" and free_mb:
         pool = [a for a in pool if vram_cost_mb(a, compute_type) <= free_mb]
@@ -149,28 +151,34 @@ def measure(sample: Path, cfg, log=None) -> list[Measurement]:
     return found
 
 
-def choose_speech(found: list[Measurement]) -> tuple[str, str]:
+def choose_speech(found: list[Measurement], live_allowed=None,
+                  final_allowed=None) -> tuple[str, str]:
     """(live, final) from measurements: the most accurate that is fast enough.
 
     The two passes have different budgets, not different goals. Live has to run
     faster than speech arrives; the final pass only has to finish in less time
     than the meeting took. Both pick the most accurate model inside that bound,
     and fall back to the fastest measured when nothing meets it.
+
+    The allowed sets carry limits a single sample cannot establish: one quiet
+    recording may time well on a model that falls behind on a real meeting, so
+    a device that rules a model out keeps ruling it out.
     """
     worked = [m for m in found if not m.error and m.realtime]
     if not worked:
         return "", ""
     rank = {m.alias: models.WHISPER_MODELS.get(m.alias, ("", 0, 0, ""))[2] for m in worked}
 
-    def best_within(limit: float) -> Measurement:
-        inside = [m for m in worked if m.realtime <= limit]
+    def best_within(limit: float, allowed) -> Measurement:
+        pool = [m for m in worked if allowed is None or m.alias in allowed] or worked
+        inside = [m for m in pool if m.realtime <= limit]
         if not inside:
-            return min(worked, key=lambda m: m.realtime)
+            return min(pool, key=lambda m: m.realtime)
         return max(inside, key=lambda m: (rank[m.alias], -m.realtime))
 
     return (
-        best_within(LIVE_REALTIME_TARGET).alias,
-        best_within(FINAL_REALTIME_TARGET).alias,
+        best_within(LIVE_REALTIME_TARGET, live_allowed).alias,
+        best_within(FINAL_REALTIME_TARGET, final_allowed).alias,
     )
 
 
@@ -230,9 +238,14 @@ def tune(cfg, sample: Path | None = None, log=None) -> Plan:
     if device == "cuda" and card:
         plan.notes.append(f"{card} MB of VRAM on this card, {free} MB free right now")
 
+    live_allowed = set(candidates(device, card, plan.compute_type, cfg, step="live"))
+    final_allowed = set(candidates(device, card, plan.compute_type, cfg, step="final"))
+
     if sample and sample.exists():
         plan.measurements = measure(sample, cfg, log=log)
-        plan.live, plan.final = choose_speech(plan.measurements)
+        plan.live, plan.final = choose_speech(
+            plan.measurements, live_allowed, final_allowed
+        )
     if not plan.live:
         # No sample, or nothing ran. The profiles encode the speed judgement
         # that timing would otherwise establish, so the live model keeps them
@@ -240,7 +253,7 @@ def tune(cfg, sample: Path | None = None, log=None) -> Plan:
         profile = hardware.PROFILES["gpu" if device == "cuda" else "cpu"]
         plan.live = profile["live_model"]
         plan.final = profile["final_model"]
-        fits = candidates(device, card, plan.compute_type, cfg)
+        fits = candidates(device, card, plan.compute_type, cfg, step="final")
         if device == "cuda" and fits:
             if plan.live not in fits:
                 # fits is largest first, so this is the best that will load.
