@@ -95,9 +95,20 @@ def test_cpu_is_not_limited_by_vram():
 
 def test_english_only_models_are_never_auto_selected():
     # Auto-tuning must not silently make a bilingual setup English-only.
+    bilingual = Config()
+    bilingual.asr.language_mode = "restrict"
+    bilingual.asr.languages = ["fr", "en"]
     for device, free in (("cuda", 8000), ("cpu", 0)):
-        for alias in tuning.candidates(device, free, "float16"):
-            assert alias not in models.ENGLISH_ONLY
+        for cfg in (None, bilingual):
+            for alias in tuning.candidates(device, free, "float16", cfg):
+                assert alias not in models.ENGLISH_ONLY
+
+
+def test_an_english_only_setup_may_use_an_english_model():
+    cfg = Config()
+    cfg.asr.language_mode = "restrict"
+    cfg.asr.languages = ["en"]
+    assert "distil-large-v3.5" in tuning.candidates("cuda", 8000, "float16", cfg)
 
 
 def test_int8_is_costed_lower_than_float16():

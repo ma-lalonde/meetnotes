@@ -95,6 +95,50 @@ def test_the_full_list_still_reaches_everything_installed():
     assert "large-v2" in everything
 
 
+def test_english_only_models_are_hidden_on_a_bilingual_setup():
+    # They cannot transcribe French at all, so on a fr+en setup they are
+    # choices that can only go wrong.
+    cfg = Config()
+    cfg.asr.language_mode = "restrict"
+    cfg.asr.languages = ["fr", "en"]
+    offered = {choice["alias"] for choice in models.whisper_choices(cfg)}
+    assert not offered & models.ENGLISH_ONLY
+    assert "large-v3-turbo" in offered
+
+
+def test_english_only_models_are_offered_when_only_english_is_expected():
+    cfg = Config()
+    cfg.asr.language_mode = "restrict"
+    cfg.asr.languages = ["en"]
+    offered = {choice["alias"] for choice in models.whisper_choices(cfg)}
+    assert "distil-large-v3.5" in offered
+    assert "tiny.en" in offered
+
+
+def test_primary_english_counts_as_english_only():
+    cfg = Config()
+    cfg.asr.language_mode = "primary"
+    cfg.asr.language = "en"
+    assert models.english_only_setup(cfg)
+    cfg.asr.language = "fr"
+    assert not models.english_only_setup(cfg)
+
+
+def test_detect_anything_is_not_an_english_only_setup():
+    # auto can be handed any language, so an .en model would be wrong.
+    cfg = Config()
+    cfg.asr.language_mode = "auto"
+    assert not models.english_only_setup(cfg)
+
+
+def test_an_english_model_still_beats_its_twin_on_english():
+    # Same parameter count, better at English: not a frontier violation, a
+    # different language class. Whisper's README puts the gain at the small end.
+    assert models.WHISPER_MODELS["tiny.en"][1] == models.WHISPER_MODELS["tiny"][1]
+    assert "better" in models.WHISPER_MODELS["tiny.en"][3]
+    assert "barely" in models.WHISPER_MODELS["small.en"][3]
+
+
 def test_compute_types_are_reported_for_cpu():
     found = models.compute_types("cpu")
     assert "int8" in found or "float32" in found

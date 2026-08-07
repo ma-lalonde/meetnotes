@@ -52,10 +52,16 @@ WHISPER_MODELS = {
     "large-v3-turbo": ("Turbo", 809, 5, "large-v2 quality at half the size"),
     "large-v2": ("Large v2", 1550, 5, "superseded by Turbo"),
     "large-v3": ("Large v3", 1550, 6, "most accurate, slowest"),
-    "tiny.en": ("Tiny EN", 39, 1, "lowest accuracy"),
-    "base.en": ("Base EN", 74, 2, "low accuracy"),
-    "small.en": ("Small EN", 244, 3, ""),
-    "medium.en": ("Medium EN", 769, 4, ""),
+    # Same parameter count as their multilingual siblings, and better at
+    # English for it, but they cannot transcribe anything else. Whisper's
+    # README: the .en models "tend to perform better, especially for the
+    # tiny.en and base.en models", and "the difference becomes less
+    # significant for the small.en and medium.en models" - which is why the
+    # gain is only worth noting on the two smallest.
+    "tiny.en": ("Tiny EN", 39, 1, "clearly better than Tiny on English"),
+    "base.en": ("Base EN", 74, 2, "clearly better than Base on English"),
+    "small.en": ("Small EN", 244, 3, "barely better than Small"),
+    "medium.en": ("Medium EN", 769, 4, "barely better than Medium"),
     "distil-large-v3": ("Distil v3 EN", 756, 5, "superseded by Distil v3.5"),
     "distil-large-v3.5": ("Distil v3.5 EN", 756, 6, "very fast"),
 }
@@ -124,15 +130,35 @@ def full_name(alias: str) -> str:
     return repos().get(alias, alias)
 
 
-def whisper_choices(all_models: bool = False) -> list[dict]:
+def english_only_setup(cfg) -> bool:
+    """Whether this configuration will only ever be given English.
+
+    An .en model is genuinely better than its multilingual twin at the same
+    size, but it cannot transcribe anything else at all, so it is only ever an
+    option for someone who has said they only need English.
+    """
+    mode = cfg.asr.language_mode
+    if mode == "auto":
+        return False
+    if mode == "primary":
+        return cfg.asr.language == "en"
+    codes = {code.strip() for code in cfg.asr.languages if code.strip()}
+    return codes == {"en"}
+
+
+def whisper_choices(cfg=None, all_models: bool = False) -> list[dict]:
     """What to offer for a speech step, best-value first.
 
     Dominated models are dropped by default: a model that is both larger and no
     more accurate than another is a choice with no upside, and offering it only
-    invites picking it.
+    invites picking it. Given a config, English-only models are dropped too
+    unless the configured languages are English and nothing else, since they
+    cannot transcribe the other language at all.
     """
     known = repos()
     pool = [alias for alias in WHISPER_MODELS if alias in known]
+    if cfg is not None and not english_only_setup(cfg):
+        pool = [alias for alias in pool if alias not in ENGLISH_ONLY]
     keep = pool if all_models else frontier(pool)
     out = []
     for alias in sorted(keep, key=lambda a: (a in ENGLISH_ONLY, -WHISPER_MODELS[a][1])):

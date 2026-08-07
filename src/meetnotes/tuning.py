@@ -87,14 +87,17 @@ class Plan:
     notes: list[str] = field(default_factory=list)
 
 
-def candidates(device: str, free_mb: int, compute_type: str) -> list[str]:
+def candidates(device: str, free_mb: int, compute_type: str, cfg=None) -> list[str]:
     """Speech models worth timing, largest first.
 
     Only the frontier, and on GPU only what fits in the memory actually free
     right now, which is the number that changed when PRIME switched mode.
+    English-only models are included only for an English-only configuration,
+    and never when no configuration is given: silently making a bilingual setup
+    English-only is worse than picking a slightly smaller model.
     """
-    pool = [c["alias"] for c in models.whisper_choices()
-            if c["alias"] not in models.ENGLISH_ONLY]
+    pool = [c["alias"] for c in models.whisper_choices(cfg)
+            if cfg is not None or c["alias"] not in models.ENGLISH_ONLY]
     if device == "cuda" and free_mb:
         pool = [a for a in pool if vram_cost_mb(a, compute_type) <= free_mb]
     return sorted(pool, key=lambda a: -models.WHISPER_MODELS[a][1])
@@ -133,7 +136,7 @@ def measure(sample: Path, cfg, log=None) -> list[Measurement]:
     compute_type = "float16" if device == "cuda" else "int8"
     free = llm.free_vram_mb() if device == "cuda" else 0
     found = []
-    for alias in candidates(device, free, compute_type):
+    for alias in candidates(device, free, compute_type, cfg):
         if log:
             log(f"timing {models.label(alias)} on {device}")
         result = time_model(sample, alias, cfg, device, compute_type)
@@ -232,7 +235,7 @@ def tune(cfg, sample: Path | None = None, log=None) -> Plan:
         profile = hardware.PROFILES["gpu" if device == "cuda" else "cpu"]
         plan.live = profile["live_model"]
         plan.final = profile["final_model"]
-        fits = candidates(device, free, plan.compute_type)
+        fits = candidates(device, free, plan.compute_type, cfg)
         if device == "cuda" and fits:
             if plan.live not in fits:
                 plan.live = fits[-1]

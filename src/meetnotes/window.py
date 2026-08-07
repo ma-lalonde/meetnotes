@@ -810,7 +810,10 @@ class ModelsScreen(QWidget):
         combo.clear()
         if allow_skip:
             combo.addItem("Skip the final pass, keep the live transcript", "")
-        for choice in models.whisper_choices():
+        # Passing the config drops English-only models unless the configured
+        # languages are English and nothing else. They cannot do French, so on
+        # a bilingual setup they are choices that can only go wrong.
+        for choice in models.whisper_choices(self.cfg):
             size = f"{choice['params_m']} M" if choice["params_m"] else ""
             note = f"  -  {choice['note']}" if choice["note"] else ""
             combo.addItem(f"{choice['label']}   {size}{note}", choice["alias"])
