@@ -143,7 +143,7 @@ def transcribe(path: Path, cfg, force: bool = False, progress=None) -> list[dict
             f"could not free the GPU before transcribing: {detail}.{llm.vram_note()} "
             f"Loading a speech model on top of a language model is what runs the "
             f"card out of memory. Unload it from LM Studio, or run "
-            f"`meetnotes unload` to see which step fails."
+            f"`./meetnotes unload` to see which step fails."
         )
 
     segments = []

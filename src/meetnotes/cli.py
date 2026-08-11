@@ -51,7 +51,7 @@ def cmd_doctor(cfg, args) -> int:
     state = hardware.cuda_state()
     print(f"\n{state['detail']}")
     if state["installable"]:
-        print("Install it with:  meetnotes gpu --install   (or the button in Settings)")
+        print("Install it with:  ./meetnotes gpu --install   (or the button in Settings)")
     elif not state["gpus"]:
         print(
             "On CPU the live model is 'small', which is slow and noticeably less accurate.\n"
@@ -88,9 +88,26 @@ def cmd_gpu(cfg, args) -> int:
             print("\nrun with --install to add CUDA support (about 1.4 GB)")
         return 0
     if not state["installable"]:
-        print("nothing to install")
+        # Say which of the three reasons it is, rather than leaving the user to
+        # guess why an install they were told to run declined to do anything.
+        if not state["gpus"]:
+            print("\nNothing to install: no NVIDIA GPU is present.")
+        elif state["usable"]:
+            print("\nNothing to install: GPU acceleration is already working.")
+        else:
+            print(
+                "\nNothing to install: cuBLAS loads, so the libraries are there.\n"
+                "The driver is what does not match. Check `nvidia-smi` against the\n"
+                "CUDA version ctranslate2 was built for."
+            )
         return 0
-    return 0 if hardware.install_cuda(log=print) else 1
+    print("\ninstalling the CUDA libraries (about 1.4 GB)...")
+    if not hardware.install_cuda(log=print):
+        return 1
+    # The check is cached, and it ran before the libraries existed.
+    hardware.cuda_runtime_ok(refresh=True)
+    print(f"\n{hardware.cuda_state()['detail']}")
+    return 0
 
 
 def cmd_sources(cfg, args) -> int:
@@ -131,8 +148,8 @@ def cmd_sources(cfg, args) -> int:
         print(f"\nsaved to {CONFIG_PATH}")
     elif not (cfg.capture.mic_source or cfg.capture.system_source):
         print("\nnothing selected yet. Pick sources with:")
-        print("  meetnotes sources --auto")
-        print("  meetnotes sources --mic <text> --system <text>")
+        print("  ./meetnotes sources --auto")
+        print("  ./meetnotes sources --mic <text> --system <text>")
     return 0
 
 
@@ -151,7 +168,7 @@ def cmd_probe(cfg, args) -> int:
         target = getattr(cfg.capture, key)
         source = next((s for s in audio.list_sources() if s.target == target), None)
         if source is None:
-            print(f"{kind}: nothing selected, run 'meetnotes sources --auto' first\n")
+            print(f"{kind}: nothing selected, run './meetnotes sources --auto' first\n")
             continue
 
         print(f"{kind}: {source.label}")
@@ -210,7 +227,7 @@ def cmd_levels(cfg, args) -> int:
             lambda db, name=label: levels.__setitem__(name, db),
         )
     if not meters:
-        print("no sources selected: meetnotes sources --auto")
+        print("no sources selected: ./meetnotes sources --auto")
         return 1
 
     for meter in meters.values():
@@ -551,7 +568,7 @@ def cmd_tune(cfg, args) -> int:
     if args.record:
         source = audio.resolve(cfg.capture.mic_source, "mic")
         if source is None:
-            print("No microphone selected. Run: meetnotes sources --auto")
+            print("No microphone selected. Run: ./meetnotes sources --auto")
             return 1
         work = Path(tempfile.mkdtemp(prefix="meetnotes-tune-"))
         sample = work / "sample.wav"
@@ -571,7 +588,7 @@ def cmd_tune(cfg, args) -> int:
     if not sample:
         print(
             "No sample given, so speech models are sized rather than timed.\n"
-            "For a real measurement: meetnotes tune --record 30\n"
+            "For a real measurement: ./meetnotes tune --record 30\n"
         )
 
     plan = tuning.tune(cfg, sample, log=lambda line: print(f"  {line}"))
@@ -679,7 +696,7 @@ def cmd_record(cfg, args) -> int:
         print()
     path = session.stop(post_process=False)
     if args.no_process:
-        print(f"\nno markdown written (--no-process). Generate it with:\n  meetnotes process {path}")
+        print(f"\nno markdown written (--no-process). Generate it with:\n  ./meetnotes process {path}")
         return 0
     report = pipeline.process(path, cfg, progress=_print_step)
     _print_report(path, report)

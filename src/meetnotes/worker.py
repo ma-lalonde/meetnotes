@@ -53,7 +53,7 @@ def prepare(plan: dict) -> None:
     if not hardware.preload_cuda():
         raise RuntimeError(
             "CUDA libraries not found in this process. Install them with "
-            "`meetnotes gpu --install`, or set asr.device to cpu."
+            "`./meetnotes gpu --install`, or set asr.device to cpu."
         )
 
 

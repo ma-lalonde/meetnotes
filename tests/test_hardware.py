@@ -21,10 +21,14 @@ from meetnotes.config import Config
 GPU = [{"name": "NVIDIA GeForce RTX 4060 Laptop GPU", "vram_mb": 8188}]
 
 
-def state(monkeypatch, gpus, dirs, usable):
+def state(monkeypatch, gpus, dirs, usable, cublas=None):
     monkeypatch.setattr(hardware, "nvidia", lambda: gpus)
     monkeypatch.setattr(hardware, "cuda_lib_dirs", lambda: dirs)
     monkeypatch.setattr(hardware, "cuda_runtime_ok", lambda: usable)
+    # Defaults to matching usable, since a working GPU implies cuBLAS loaded.
+    monkeypatch.setattr(
+        hardware, "cublas_ok", lambda: usable if cublas is None else cublas
+    )
     return hardware.cuda_state()
 
 
@@ -48,8 +52,25 @@ def test_gpu_without_usable_libraries_is_installable(monkeypatch):
     assert result["installable"] is True
 
 
-def test_wheels_present_but_broken_is_not_installable(monkeypatch):
-    result = state(monkeypatch, GPU, ["/x/nvidia/cudnn/lib"], False)
+def test_a_visible_gpu_without_cublas_is_installable(monkeypatch):
+    # The reported case: the driver is fine and the card is visible, so the
+    # device count check passed, but ctranslate2 cannot run without cuBLAS.
+    # Keying "installable" off that check said there was nothing to install.
+    result = state(monkeypatch, GPU, [], usable=False, cublas=False)
+    assert result["installable"] is True
+    assert "cuBLAS is missing" in result["detail"]
+
+
+def test_half_installed_wheels_are_still_installable(monkeypatch):
+    # A directory exists but cuBLAS will not load. Re-running the install is
+    # exactly the right move, and "nothing to install" was not.
+    result = state(monkeypatch, GPU, ["/x/nvidia/cudnn/lib"], usable=False, cublas=False)
+    assert result["installable"] is True
+
+
+def test_libraries_that_load_but_do_not_work_point_at_the_driver(monkeypatch):
+    # cuBLAS loads, so downloading it again changes nothing.
+    result = state(monkeypatch, GPU, ["/x/nvidia/cudnn/lib"], usable=False, cublas=True)
     assert result["installable"] is False
     assert "driver" in result["detail"]
 
@@ -58,6 +79,21 @@ def test_no_gpu_is_never_installable(monkeypatch):
     result = state(monkeypatch, [], [], False)
     assert result["installable"] is False
     assert "No NVIDIA GPU" in result["detail"]
+
+
+def test_a_visible_card_without_cublas_is_not_usable(monkeypatch):
+    # get_cuda_device_count only talks to the driver, so on its own it reported
+    # a working GPU right up until a model tried to load.
+    import types
+
+    monkeypatch.setattr(hardware, "_cuda_ok", None, raising=False)
+    monkeypatch.setattr(hardware, "preload_cuda", lambda: False)
+    monkeypatch.setattr(hardware, "cublas_ok", lambda: False)
+    monkeypatch.setitem(
+        __import__("sys").modules, "ctranslate2",
+        types.SimpleNamespace(get_cuda_device_count=lambda: 1),
+    )
+    assert hardware.cuda_runtime_ok(refresh=True) is False
 
 
 def test_gpu_profile_selects_turbo_on_cuda(monkeypatch):

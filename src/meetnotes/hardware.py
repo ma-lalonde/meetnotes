@@ -152,6 +152,28 @@ def preload_cuda() -> bool:
 
 _cuda_ok: bool | None = None
 
+# What CTranslate2 actually links against, beyond the driver.
+CUBLAS_SONAMES = ("libcublas.so.12", "libcublas.so.11", "libcublas.so")
+
+
+def cublas_ok() -> bool:
+    """Whether cuBLAS can be loaded, from the wheels or from the system.
+
+    Separate from device detection on purpose. get_cuda_device_count talks to
+    the driver and succeeds on a machine with no cuBLAS at all, which is how a
+    GPU could be reported as working right up until a model tried to load and
+    the libraries were reported missing.
+    """
+    if cuda_lib_dirs():
+        return preload_cuda()
+    for soname in CUBLAS_SONAMES:
+        try:
+            ctypes.CDLL(soname, mode=ctypes.RTLD_GLOBAL)
+            return True
+        except OSError:
+            continue
+    return False
+
 
 def cuda_runtime_ok(refresh: bool = False) -> bool:
     """Cached: the first call initializes CUDA, which on a hybrid-graphics
@@ -169,7 +191,8 @@ def cuda_runtime_ok(refresh: bool = False) -> bool:
         return False
     preload_cuda()
     try:
-        _cuda_ok = ctranslate2.get_cuda_device_count() > 0
+        # Both, because either one alone is a GPU that cannot run a model.
+        _cuda_ok = ctranslate2.get_cuda_device_count() > 0 and cublas_ok()
     except Exception:
         _cuda_ok = False
     return _cuda_ok
@@ -203,6 +226,12 @@ def cuda_diagnostics() -> list[tuple[str, str]]:
         rows.append(("ctranslate2 CUDA devices", str(ctranslate2.get_cuda_device_count())))
     except Exception as exc:
         rows.append(("ctranslate2 CUDA devices", f"error: {exc}"))
+    # Its own row because it is the check that decides, and the device count
+    # above passes without it: a visible card is not a usable one.
+    rows.append((
+        "cuBLAS loadable",
+        "yes" if cublas_ok() else "NO - this is what stops a model loading",
+    ))
     try:
         rows.append(("ctranslate2 compute types", str(sorted(
             ctranslate2.get_supported_compute_types("cuda")
@@ -216,11 +245,18 @@ def cuda_state() -> dict:
     gpus = nvidia()
     dirs = cuda_lib_dirs()
     usable = cuda_runtime_ok()
+    cublas = cublas_ok()
     if usable:
         source = "pip wheels" if dirs else "system CUDA libraries"
         detail = f"GPU acceleration active, using the {source}"
     elif not gpus:
         detail = "No NVIDIA GPU detected, running on CPU"
+    elif not cublas:
+        detail = (
+            "GPU found, but cuBLAS is missing: the driver is there and the card "
+            "is visible, which is not enough to run a model (the wheels are "
+            "about 1.4 GB)"
+        )
     elif not dirs:
         detail = "GPU found but no usable CUDA libraries (the wheels are about 1.4 GB)"
     else:
@@ -228,10 +264,13 @@ def cuda_state() -> dict:
     return {
         "gpus": gpus,
         "libs_installed": bool(dirs),
+        "cublas": cublas,
         "usable": usable,
-        # Only worth downloading when the GPU exists and nothing already works.
-        # A working system CUDA install makes the wheels redundant.
-        "installable": bool(gpus) and not usable and not dirs,
+        # Worth downloading when the card is there and cuBLAS is not. Keyed on
+        # cuBLAS rather than on the wheel directories, because a half-installed
+        # set of wheels is exactly the case that needs installing and used to
+        # report that there was nothing to do.
+        "installable": bool(gpus) and not usable and not cublas,
         "detail": detail,
     }
 
