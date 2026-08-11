@@ -188,6 +188,16 @@ recorded before this layout are moved on the next run, hand edits included.
 rule set, never from a language model. The verbatim transcript has to stay
 trustworthy. An LLM rewrite is available per meeting, never automatic.
 
+**Where the speech models come from.** huggingface.co, cached under
+`~/.cache/huggingface/hub`, downloaded once on first use. It is a download host
+and nothing else: no audio, no transcript and no token ever goes there, and the
+repositories are public. `huggingface_hub` prints a warning about
+unauthenticated requests on first download - that is about its own rate limits,
+not about anything being refused. `./meetnotes doctor` prints the path.
+
+`diarization.hf_token` in the config is for the pyannote seam, which is not
+wired up, and is never read.
+
 **GPU memory.** Speech recognition runs in a child process, because CTranslate2
 allocates through a caching allocator that never returns VRAM to the driver
 while the process lives; its exit is the only release. Language models are

@@ -134,9 +134,15 @@ class WorkerError(RuntimeError):
 
 
 def transcribe_file_isolated(
-    path: Path, cfg, plan: dict, extra_terms: list[str] | None = None
+    path: Path, cfg, plan: dict, extra_terms: list[str] | None = None, log=None
 ) -> list[dict]:
-    """transcribe_file in a child process, so the VRAM comes back on exit."""
+    """transcribe_file in a child process, so the VRAM comes back on exit.
+
+    Anything the child writes to stderr goes to `log`, whether or not the run
+    succeeded. CUDA, CTranslate2 and huggingface_hub all warn there, and those
+    warnings were reaching the terminal with nothing to say which process they
+    came from or whether they mattered.
+    """
     request = {
         "mode": "file",
         "path": str(path),
@@ -151,6 +157,9 @@ def transcribe_file_isolated(
         text=True,
         timeout=cfg.asr.worker_timeout,
     )
+    if log and (done.stderr or "").strip():
+        for line in done.stderr.strip().splitlines():
+            log(f"[{path.name}] {line}")
     payload = {}
     for line in done.stdout.splitlines():
         try:

@@ -318,7 +318,7 @@ def test_language_models_are_unloaded_before_transcribing(tmp_path, monkeypatch)
     monkeypatch.setattr(asr, "isolated", lambda cfg, plan: True)
     monkeypatch.setattr(
         asr, "transcribe_file_isolated",
-        lambda path, cfg, plan: (order.append("transcribe"), [])[1],
+        lambda path, cfg, plan, log=None: (order.append("transcribe"), [])[1],
     )
 
     path = store.new_meeting(tmp_path, "demo")

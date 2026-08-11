@@ -23,16 +23,25 @@ from .config import CONFIG_PATH, Config
 
 
 def cmd_doctor(cfg, args) -> int:
+    from . import models
+
     info = hardware.report(cfg)
-    width = max(len(k) for k in info)
+    venv = hardware.venv_health()
+    extra = [
+        ("config", CONFIG_PATH),
+        ("tray", hardware.tray_available()),
+        # Named because a huggingface_hub warning during the first
+        # transcription is otherwise the first anyone hears of where the
+        # weights come from.
+        ("speech models", f"huggingface.co -> {models.cache_dir()}"),
+        ("venv", venv["venv"]),
+        ("symlinks", venv["symlinks_supported"]),
+    ]
+    width = max(len(k) for k in list(info) + [k for k, _ in extra])
     for key, value in info.items():
         print(f"{key.ljust(width)}  {value}")
-    print(f"{'config'.ljust(width)}  {CONFIG_PATH}")
-    print(f"{'tray'.ljust(width)}  {hardware.tray_available()}")
-
-    venv = hardware.venv_health()
-    print(f"{'venv'.ljust(width)}  {venv['venv']}")
-    print(f"{'symlinks'.ljust(width)}  {venv['symlinks_supported']}")
+    for key, value in extra:
+        print(f"{key.ljust(width)}  {value}")
 
     if venv["rebuilds_every_launch"]:
         print(
@@ -53,10 +62,12 @@ def cmd_doctor(cfg, args) -> int:
     if state["installable"]:
         print("Install it with:  ./meetnotes gpu --install   (or the button in Settings)")
     elif not state["gpus"]:
+        plan = hardware.plan(cfg)
         print(
-            "On CPU the live model is 'small', which is slow and noticeably less accurate.\n"
-            "The final pass still uses large-v3-turbo, so the saved transcript is much\n"
-            "better than the live one."
+            f"On CPU the live model is '{plan['live_model']}', which is fast enough to "
+            f"keep up\nand noticeably less accurate. The final pass uses "
+            f"'{plan['final_model']}', so the\nsaved transcript is much better than the "
+            f"live one."
         )
     return 0
 

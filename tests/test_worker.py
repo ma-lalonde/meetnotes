@@ -154,6 +154,41 @@ def test_a_live_worker_that_dies_reports_stderr(tmp_path, monkeypatch):
     assert "no CUDA-capable device" in worker.error
 
 
+def test_the_childs_warnings_are_kept_not_left_in_the_terminal(tmp_path, monkeypatch):
+    # CUDA, CTranslate2 and huggingface_hub all warn on stderr. Those were
+    # reaching the terminal with nothing to say which process produced them.
+    monkeypatch.setattr(asr, "_worker_command", lambda: fake_worker(tmp_path, """
+        sys.stderr.write("no device found under /dev/dri/card4\\n")
+        sys.stderr.write("unauthenticated requests are rate-limited\\n")
+        print(json.dumps({"segments": []}))
+        """))
+    kept = []
+    asr.transcribe_file_isolated(
+        tmp_path / "a.wav", Config(), {"device": "cuda"}, log=kept.append
+    )
+    assert any("dri/card4" in line for line in kept)
+    assert any("unauthenticated" in line for line in kept)
+    # Attributed to the track it came from.
+    assert all(line.startswith("[a.wav]") for line in kept)
+
+
+def test_warnings_do_not_turn_a_good_run_into_a_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(asr, "_worker_command", lambda: fake_worker(tmp_path, """
+        sys.stderr.write("some library grumbling\\n")
+        print(json.dumps({"segments": [{"start": 0.0, "end": 1.0, "text": "hi"}]}))
+        """))
+    got = asr.transcribe_file_isolated(
+        tmp_path / "a.wav", Config(), {"device": "cuda"}, log=lambda line: None
+    )
+    assert got == [{"start": 0.0, "end": 1.0, "text": "hi"}]
+
+
+def test_the_model_cache_is_named_rather_than_implied():
+    from meetnotes import models
+
+    assert "huggingface" in str(models.cache_dir())
+
+
 def test_the_worker_loads_cuda_itself(monkeypatch):
     # The parent preloads through hardware.plan, but the plan arrives here
     # already resolved, so nothing in the child triggered it and CTranslate2

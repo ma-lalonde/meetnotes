@@ -19,6 +19,9 @@ No size or memory estimates: faster-whisper reports none, LM Studio reports
 none, and guessing them from a model name was worse than useless.
 """
 
+import os
+from pathlib import Path
+
 # Fallback if faster-whisper's table cannot be read. Kept in sync by
 # resolve_catalog(), which prefers the installed library's own mapping.
 FALLBACK_REPOS = {
@@ -149,6 +152,21 @@ def frontier(aliases=None) -> list[str]:
 def label(alias: str) -> str:
     entry = WHISPER_MODELS.get(alias)
     return entry[0] if entry else alias
+
+
+def cache_dir() -> Path:
+    """Where faster-whisper stores downloaded weights.
+
+    Speech models come from huggingface.co, which is a download host and
+    nothing more: no audio, no transcript and no token ever goes there. The
+    repositories are public, so the warning huggingface_hub prints about
+    unauthenticated requests is about its own rate limits, not about anything
+    being refused.
+    """
+    override = os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")
+    if override:
+        return Path(override).expanduser()
+    return Path("~/.cache/huggingface/hub").expanduser()
 
 
 def repos() -> dict[str, str]:

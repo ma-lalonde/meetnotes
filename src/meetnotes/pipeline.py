@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import artifacts, asr, hardware, llm, outputs, prompts, store
+from . import artifacts, asr, hardware, llm, models, outputs, prompts, store
 
 
 def _audio_fingerprint(path: Path, meta: dict, plan: dict, cfg) -> str:
@@ -147,6 +147,12 @@ def transcribe(path: Path, cfg, force: bool = False, progress=None) -> list[dict
         )
 
     segments = []
+    notes = [
+        f"device {plan['device']} ({plan['compute_type']})",
+        f"model  {plan['final_model']}",
+        f"weights come from huggingface.co, cached in {models.cache_dir()}",
+    ]
+    isolated = asr.isolated(cfg, plan)
     for label, filename in meta.get("tracks", {}).items():
         track = path / "audio" / filename
         if not track.exists():
@@ -155,10 +161,20 @@ def transcribe(path: Path, cfg, force: bool = False, progress=None) -> list[dict
             progress(f"transcribing {label}", stage_fraction("transcribing") * 0.5)
         # On GPU this runs in a child process: its exit is the only thing that
         # gives the VRAM back before the language model needs it.
-        run = asr.transcribe_file_isolated if asr.isolated(cfg, plan) else asr.transcribe_file
-        for seg in run(track, cfg, plan):
+        if isolated:
+            found = asr.transcribe_file_isolated(track, cfg, plan, log=notes.append)
+        else:
+            found = asr.transcribe_file(track, cfg, plan)
+        for seg in found:
             segments.append({**seg, "speaker": label})
     segments.sort(key=lambda s: s["start"])
+
+    # Whatever the recogniser said for itself, kept next to the transcript it
+    # produced. Warnings from CUDA and huggingface_hub otherwise appear in the
+    # terminal with nothing to attribute them to.
+    target = path / RAW / "transcription.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    store.write_atomic(target, "\n".join(notes) + "\n")
 
     meta["segments"] = segments
     meta["run"] = hardware.provenance(cfg, plan)
