@@ -23,10 +23,11 @@ wget -qO- https://astral.sh/uv/install.sh | sh
 Then:
 
 ```bash
+sudo apt install git pipewire-bin pulseaudio-utils libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0
 git clone https://github.com/ma-lalonde/meetnotes.git
 cd meetnotes
-sudo apt install pipewire-bin pulseaudio-utils libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0
-./meetnotes
+chmod +x meetnotes
+./meetnotes &
 ```
 
 The first launch downloads dependencies and a speech model, so give it a few
