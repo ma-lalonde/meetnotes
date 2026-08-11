@@ -154,6 +154,51 @@ def test_a_live_worker_that_dies_reports_stderr(tmp_path, monkeypatch):
     assert "no CUDA-capable device" in worker.error
 
 
+def test_the_worker_loads_cuda_itself(monkeypatch):
+    # The parent preloads through hardware.plan, but the plan arrives here
+    # already resolved, so nothing in the child triggered it and CTranslate2
+    # could not find libcublas. The loader reads LD_LIBRARY_PATH at process
+    # start, so it cannot be inherited either.
+    from meetnotes import hardware, worker
+
+    called = []
+    monkeypatch.setattr(hardware, "preload_cuda", lambda: called.append(True) or True)
+    worker.prepare({"device": "cuda"})
+    assert called == [True]
+
+
+def test_the_worker_does_not_touch_cuda_on_cpu(monkeypatch):
+    from meetnotes import hardware, worker
+
+    monkeypatch.setattr(hardware, "preload_cuda", lambda: pytest.fail("not on cpu"))
+    worker.prepare({"device": "cpu"})
+
+
+def test_a_missing_cuda_library_is_named_not_left_to_ctranslate2(monkeypatch):
+    from meetnotes import hardware, worker
+
+    monkeypatch.setattr(hardware, "preload_cuda", lambda: False)
+    with pytest.raises(RuntimeError) as caught:
+        worker.prepare({"device": "cuda"})
+    assert "meetnotes gpu --install" in str(caught.value)
+
+
+def test_the_worker_reports_a_cuda_failure_over_the_boundary(tmp_path):
+    # The parent has no other way to see it: a child that dies without a
+    # message reads as a transcript with no speech.
+    done = subprocess.run(
+        [sys.executable, "-m", "meetnotes.worker"],
+        input=json.dumps({
+            "mode": "file", "path": str(tmp_path / "a.wav"),
+            "config": {}, "plan": {"device": "cuda"},
+        }) + "\n",
+        capture_output=True, text=True, timeout=120,
+    )
+    payload = json.loads(done.stdout.strip().splitlines()[-1])
+    assert done.returncode == 1
+    assert "error" in payload
+
+
 def test_the_real_worker_module_starts_and_reports_a_bad_request():
     # Proves the module is importable and runnable as a child process, which a
     # monkeypatched command can never show.

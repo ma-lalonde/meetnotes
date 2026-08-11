@@ -30,13 +30,31 @@ import signal
 import sys
 from pathlib import Path
 
-from . import asr
+from . import asr, hardware
 from .config import Config
 
 
 def _emit(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+def prepare(plan: dict) -> None:
+    """Load the CUDA libraries into this process before CTranslate2 needs them.
+
+    The parent does this through hardware.plan, but the plan arrives here
+    already resolved, so nothing in the child ever triggered it and
+    CTranslate2 could not find libcublas. The dynamic loader reads
+    LD_LIBRARY_PATH at process start, which is why this has to happen inside
+    the process that will use the libraries rather than being inherited.
+    """
+    if plan.get("device") != "cuda":
+        return
+    if not hardware.preload_cuda():
+        raise RuntimeError(
+            "CUDA libraries not found in this process. Install them with "
+            "`meetnotes gpu --install`, or set asr.device to cpu."
+        )
 
 
 def run_file(request: dict) -> int:
@@ -77,6 +95,7 @@ def run_live(request: dict) -> int:
 def main() -> int:
     request = json.loads(sys.stdin.readline())
     try:
+        prepare(request.get("plan") or {})
         if request["mode"] == "file":
             return run_file(request)
         return run_live(request)

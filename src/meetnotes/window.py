@@ -59,6 +59,8 @@ class RecordScreen(QWidget):
         self.system_name.setMaximumWidth(180)
         self.mic_level = self._make_meter()
         self.system_level = self._make_meter()
+        # Bounded, so a machine with genuinely no capture sources stops asking.
+        self._source_retries = 0
         self.button = QPushButton("Start recording")
         self.button.clicked.connect(self.toggle)
         self.elapsed = QLabel("00:00:00")
@@ -146,6 +148,13 @@ class RecordScreen(QWidget):
             index = combo.findData(current)
             if index >= 0:
                 combo.setCurrentIndex(index)
+            elif combo.count():
+                # Nothing stored, or a target from a different machine. Qt has
+                # already selected the first entry, so adopt it rather than
+                # leaving the config disagreeing with what is on screen: the
+                # meters read the config, and a silent disagreement is why they
+                # showed nothing at all on a new machine.
+                setattr(self.cfg.capture, key, combo.currentData())
             combo.blockSignals(False)
 
     def refresh_engine(self):
@@ -207,8 +216,16 @@ class RecordScreen(QWidget):
             return
 
         known = {s.target: s for s in audio.list_sources()}
-        for kind, key in (("mic", "mic_source"), ("system", "system_source")):
-            source = known.get(getattr(self.cfg.capture, key))
+        for kind, key, combo in (
+            ("mic", "mic_source", self.mic),
+            ("system", "system_source", self.system),
+        ):
+            # The picker is what the user can see, so it decides. Reading only
+            # the config meant a stored target from another machine produced no
+            # meter and no explanation.
+            source = known.get(combo.currentData()) or known.get(
+                getattr(self.cfg.capture, key)
+            )
             if source is None:
                 continue
             meter = audio.Meter(
@@ -217,6 +234,20 @@ class RecordScreen(QWidget):
             )
             self.meters[kind] = meter
             meter.start()
+
+        if not self.meters and self._source_retries < 5:
+            # PipeWire is not always answering by the time the window opens, so
+            # the first enumeration can come back empty. Ask again shortly
+            # rather than waiting for the user to change tabs, which is what
+            # made this look like it needed a nudge.
+            self._source_retries += 1
+            QTimer.singleShot(1200, self._retry_sources)
+
+    def _retry_sources(self):
+        if not self.isVisible() or self.meters:
+            return
+        self.reload()
+        self.start_meters()
 
     def stop_meters(self):
         for meter in self.meters.values():
